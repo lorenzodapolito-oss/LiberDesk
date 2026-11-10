@@ -5,7 +5,7 @@ Programma Windows scritto in Rust (egui), un solo `.exe`, nessuna installazione.
 
 ## Come si usa
 1. Metti `LiberDesk.exe` dove vuoi (anche sulla chiavetta). Accanto crea la cartella `Apps`.
-2. Dentro `Apps` metti le app portabili, **una cartella per app** (es. `Apps\Notepad++`). Compaiono da sole nell'elenco.
+2. Dentro `Apps` metti le app portabili, **una cartella per app** (es. `Apps\Notepad++`), oppure **cartelle di categoria** che contengono più programmi (es. `Apps\Internet\Firefox`, `Apps\Multimedia\VLC`): il nome della cartella diventa la categoria. Compaiono da sole nell'elenco.
 3. Doppio clic su **Avvia** per aprirle.
 4. All'avvio LiberDesk controlla se ci sono versioni nuove delle app che conosce, le scarica e le installa.
 

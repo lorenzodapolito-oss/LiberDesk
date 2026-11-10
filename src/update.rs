@@ -214,16 +214,13 @@ pub fn apply(
     asset: &Asset,
     log: &mut dyn FnMut(Kind, &str),
 ) -> Result<(), String> {
-    let apps_dir = app
-        .dir
-        .parent()
-        .ok_or("Cartella dell'app non valida")?
-        .to_path_buf();
+    let apps_dir = app.root.clone();
     let folder = app
         .dir
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .ok_or("Cartella dell'app non valida")?;
+        .strip_prefix(&app.root)
+        .map_err(|_| "Cartella dell'app non valida".to_string())?
+        .to_string_lossy()
+        .to_string();
     let ext = extension(&asset.name);
     if ext != "zip" && ext != "7z" && ext != "exe" {
         return Err(format!(
@@ -345,6 +342,8 @@ mod tests {
             dir,
             exe: None,
             entry: catalog::find_for_folder(folder),
+            root: d.to_path_buf(),
+            folder_category: None,
         }
     }
 
@@ -535,6 +534,8 @@ mod tests {
             dir: dir.clone(),
             exe: None,
             entry: catalog::find_for_folder("Rufus"),
+            root: d.clone(),
+            folder_category: None,
         };
         let h = FakeHttp::default();
         h.files

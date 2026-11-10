@@ -10,6 +10,10 @@ pub struct App {
     pub dir: PathBuf,
     pub exe: Option<PathBuf>,
     pub entry: Option<&'static Entry>,
+    /// Cartella principale delle app (dove stanno anche `_temp` e `_backup`).
+    pub root: PathBuf,
+    /// Se l'app sta dentro una cartella di categoria, il nome di quella cartella.
+    pub folder_category: Option<String>,
 }
 
 const SKIP_WORDS: [&str; 6] = ["unins", "uninst", "setup", "update", "crash", "helper"];
@@ -79,32 +83,68 @@ pub fn find_exe(dir: &Path, entry: Option<&Entry>) -> Option<PathBuf> {
     all.iter().filter(good).max_by_key(|p| size(p)).cloned()
 }
 
-/// Elenco delle app, in ordine alfabetico. Le cartelle che cominciano con `_` o `.` si ignorano.
-pub fn scan(apps_dir: &Path) -> Vec<App> {
-    let Ok(rd) = fs::read_dir(apps_dir) else {
+/// Cartelle che di solito stanno dentro un programma e non sono programmi a sé.
+const GENERIC_SUBDIRS: [&str; 12] = [
+    "bin", "app", "apps", "program", "programs", "x64", "x86", "win64", "win32", "32bit", "64bit",
+    "files",
+];
+
+/// Sottocartelle (senza quelle che cominciano con `_` o `.`).
+fn subdirs(dir: &Path) -> Vec<(String, PathBuf)> {
+    let Ok(rd) = fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut apps: Vec<App> = rd
-        .flatten()
+    rd.flatten()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with(['_', '.']) {
-                return None;
-            }
-            let dir = e.path();
-            let entry = catalog::find_for_folder(&name);
-            let exe = find_exe(&dir, entry);
-            exe.as_ref()?;
-            let shown = entry.map_or(name, |en| en.name.to_string());
-            Some(App {
-                name: shown,
-                dir,
-                exe,
-                entry,
-            })
+            (!name.starts_with(['_', '.'])).then(|| (name, e.path()))
         })
-        .collect();
+        .collect()
+}
+
+fn has_direct_exe(dir: &Path) -> bool {
+    fs::read_dir(dir).is_ok_and(|rd| {
+        rd.flatten()
+            .any(|e| e.file_type().is_ok_and(|t| t.is_file()) && is_exe(&e.path()))
+    })
+}
+
+fn make_app(name: String, dir: PathBuf, root: &Path, category: Option<&str>) -> Option<App> {
+    let entry = catalog::find_for_folder(&name);
+    let exe = find_exe(&dir, entry);
+    exe.as_ref()?;
+    Some(App {
+        name: entry.map_or(name, |en| en.name.to_string()),
+        dir,
+        exe,
+        entry,
+        root: root.to_path_buf(),
+        folder_category: category.map(String::from),
+    })
+}
+
+/// Elenco delle app, in ordine alfabetico. Una cartella senza `.exe` propri che contiene
+/// altri programmi è una categoria: le app che ci stanno dentro ne prendono il nome.
+pub fn scan(apps_dir: &Path) -> Vec<App> {
+    let mut apps = Vec::new();
+    for (name, dir) in subdirs(apps_dir) {
+        let known = catalog::find_for_folder(&name).is_some();
+        let children: Vec<(String, PathBuf)> = subdirs(&dir)
+            .into_iter()
+            .filter(|(n, _)| !GENERIC_SUBDIRS.contains(&n.to_lowercase().as_str()))
+            .collect();
+        let is_category = !known
+            && !has_direct_exe(&dir)
+            && children.iter().any(|(_, d)| find_exe(d, None).is_some());
+        if is_category {
+            for (cname, cdir) in children {
+                apps.extend(make_app(cname, cdir, apps_dir, Some(&name)));
+            }
+        } else {
+            apps.extend(make_app(name, dir, apps_dir, None));
+        }
+    }
     apps.sort_by_key(|a| a.name.to_lowercase());
     apps
 }
@@ -173,6 +213,42 @@ mod tests {
         let apps = scan(&d);
         assert_eq!(apps.len(), 1);
         assert!(apps[0].exe.as_ref().unwrap().ends_with("obs64.exe"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn category_folders_hold_several_programs() {
+        let d = tmp("cat");
+        file(&d.join("Internet/Firefox/firefox.exe"), 10);
+        file(&d.join("Internet/Notepad++/notepad++.exe"), 10);
+        file(&d.join("Multimedia/VLC/vlc.exe"), 10);
+        file(&d.join("Multimedia/_vecchio/x.exe"), 10);
+        file(&d.join("OBS/bin/64bit/obs64.exe"), 10);
+        file(&d.join("Piatta/piatta.exe"), 10);
+        file(&d.join("Utility/Tool/bin/tool.exe"), 10);
+        let apps = scan(&d);
+        let get = |n: &str| apps.iter().find(|a| a.name == n);
+        assert_eq!(
+            get("Firefox").unwrap().folder_category.as_deref(),
+            Some("Internet")
+        );
+        assert_eq!(
+            get("Notepad++").unwrap().folder_category.as_deref(),
+            Some("Internet")
+        );
+        assert_eq!(
+            get("VLC").unwrap().folder_category.as_deref(),
+            Some("Multimedia")
+        );
+        assert_eq!(
+            get("Tool").unwrap().folder_category.as_deref(),
+            Some("Utility")
+        );
+        // Programmi senza categoria, anche con exe in sottocartelle.
+        assert_eq!(get("OBS Studio").unwrap().folder_category, None);
+        assert_eq!(get("Piatta").unwrap().folder_category, None);
+        assert!(apps.iter().all(|a| a.root == d));
+        assert_eq!(apps.len(), 6);
         let _ = fs::remove_dir_all(&d);
     }
 

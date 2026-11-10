@@ -91,20 +91,36 @@ fn avatar_color(name: &str) -> Color32 {
     COLORS[h % COLORS.len()]
 }
 
-/// Categoria scelta dall'utente, altrimenti quella del catalogo, altrimenti «Altro».
+/// Categoria: quella scelta dall'utente, poi la cartella in cui sta l'app, poi il catalogo,
+/// poi «Altro».
 pub fn category_of(app: &App, st: &state::State) -> String {
     st.category
         .clone()
-        .filter(|c| CATEGORIES.contains(&c.as_str()))
+        .filter(|c| !c.trim().is_empty())
+        .or_else(|| app.folder_category.clone())
         .or_else(|| app.entry.map(|e| e.category.to_string()))
         .unwrap_or_else(|| "Altro".to_string())
 }
 
-/// Indici delle righe per categoria, nell'ordine di `CATEGORIES`; salta quelle vuote.
+/// Posizione di una categoria: quelle note nel loro ordine, le altre in ordine alfabetico,
+/// «Altro» per ultima.
+fn rank(c: &str) -> (u8, usize, String) {
+    if c == "Altro" {
+        return (2, 0, String::new());
+    }
+    match CATEGORIES.iter().position(|k| *k == c) {
+        Some(p) => (0, p, String::new()),
+        None => (1, 0, c.to_lowercase()),
+    }
+}
+
+/// Indici delle righe per categoria; salta quelle vuote.
 fn group(rows: &[(String, String)], filter: &str) -> Vec<(String, Vec<usize>)> {
     let f = filter.trim().to_lowercase();
-    CATEGORIES
-        .iter()
+    let mut cats: Vec<&String> = rows.iter().map(|(c, _)| c).collect();
+    cats.sort_by_key(|c| rank(c));
+    cats.dedup();
+    cats.into_iter()
         .filter_map(|c| {
             let idx: Vec<usize> = rows
                 .iter()
@@ -114,7 +130,7 @@ fn group(rows: &[(String, String)], filter: &str) -> Vec<(String, Vec<usize>)> {
                 })
                 .map(|(i, _)| i)
                 .collect();
-            (!idx.is_empty()).then(|| ((*c).to_string(), idx))
+            (!idx.is_empty()).then(|| (c.clone(), idx))
         })
         .collect()
 }
@@ -411,6 +427,12 @@ impl LiberApp {
             .map(|r| (r.category.clone(), r.app.name.clone()))
             .collect();
         let groups = group(&pairs, &self.filter);
+        let mut all_cats: Vec<String> = CATEGORIES.iter().map(|c| (*c).to_string()).collect();
+        for (c, _) in &pairs {
+            if !all_cats.contains(c) {
+                all_cats.push(c.clone());
+            }
+        }
         let mut launch = None;
         let mut upd = None;
         let mut moved: Option<(usize, String)> = None;
@@ -478,9 +500,9 @@ impl LiberApp {
                             });
                         tile.response.context_menu(|ui| {
                             ui.menu_button("Sposta in…", |ui| {
-                                for c in CATEGORIES {
+                                for c in &all_cats {
                                     if ui.button(c).clicked() {
-                                        moved = Some((i, c.to_string()));
+                                        moved = Some((i, c.clone()));
                                         ui.close();
                                     }
                                 }
@@ -626,6 +648,8 @@ mod tests {
                 dir: PathBuf::from("X"),
                 exe: None,
                 entry: catalog::find_for_folder("Rufus"),
+                root: PathBuf::from("."),
+                folder_category: None,
             },
             category: "Sistema".into(),
             local: None,
@@ -682,7 +706,15 @@ mod tests {
         let f = group(&rows, "ruf");
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].1, vec![0]);
-        assert!(group(&[("Strana".into(), "X".into())], "").is_empty());
+        // Categorie delle cartelle dell'utente: dopo quelle note, «Altro» in fondo.
+        let r2 = vec![
+            ("Altro".to_string(), "A".to_string()),
+            ("Zeta".to_string(), "B".to_string()),
+            ("Beta".to_string(), "C".to_string()),
+            ("Sistema".to_string(), "D".to_string()),
+        ];
+        let n: Vec<_> = group(&r2, "").into_iter().map(|(c, _)| c).collect();
+        assert_eq!(n, vec!["Sistema", "Beta", "Zeta", "Altro"]);
     }
 
     #[test]
@@ -692,8 +724,11 @@ mod tests {
         assert_eq!(category_of(&a, &st), "Sistema");
         st.category = Some("Giochi".into());
         assert_eq!(category_of(&a, &st), "Giochi");
-        st.category = Some("Inventata".into());
+        st.category = Some("  ".into());
         assert_eq!(category_of(&a, &st), "Sistema");
+        a.folder_category = Some("Utility".into());
+        assert_eq!(category_of(&a, &state::State::default()), "Utility");
+        a.folder_category = None;
         a.entry = None;
         assert_eq!(category_of(&a, &state::State::default()), "Altro");
     }
