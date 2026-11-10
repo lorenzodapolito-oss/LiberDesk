@@ -8,6 +8,7 @@ mod config;
 mod github;
 mod net;
 mod scan;
+mod search;
 mod state;
 mod theme;
 mod update;

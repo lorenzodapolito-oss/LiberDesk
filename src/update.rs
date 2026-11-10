@@ -67,11 +67,17 @@ impl Probe for RealProbe {
     }
 }
 
-/// Versione installata: quella salvata, altrimenti quella dell'eseguibile.
+/// Versione installata: quella salvata da LiberDesk, poi quella scritta nel nome della cartella
+/// (solo per le app del catalogo), poi quella dell'eseguibile.
 pub fn local_version(app: &App, st: &State, probe: &dyn Probe) -> Option<String> {
     st.version
         .clone()
         .filter(|v| !version::segments(v).is_empty())
+        .or_else(|| {
+            app.entry?;
+            let name = app.dir.file_name()?.to_string_lossy().to_string();
+            version::from_folder_name(&name)
+        })
         .or_else(|| app.exe.as_ref().and_then(|e| probe.file_version(e)))
 }
 
@@ -385,6 +391,21 @@ mod tests {
             Some("1.0")
         );
         assert_eq!(local_version(&app, &State::default(), &P(None)), None);
+        // La versione nel nome della cartella conta solo per le app del catalogo.
+        let kp = App {
+            dir: d.join("KeePassXC-2.7.11-Win64"),
+            entry: catalog::find_for_folder("KeePassXC"),
+            ..app.clone()
+        };
+        assert_eq!(
+            local_version(&kp, &State::default(), &P(Some("9.9"))).as_deref(),
+            Some("2.7.11")
+        );
+        let other = App { entry: None, ..kp };
+        assert_eq!(
+            local_version(&other, &State::default(), &P(Some("9.9"))).as_deref(),
+            Some("9.9")
+        );
         let _ = fs::remove_dir_all(&d);
     }
 

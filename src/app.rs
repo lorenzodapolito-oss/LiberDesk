@@ -348,6 +348,26 @@ impl LiberApp {
         }
     }
 
+    fn search_update(&mut self, idx: usize) {
+        let Some(name) = self.rows.get(idx).map(|r| {
+            r.app
+                .dir
+                .file_name()
+                .map_or(r.app.name.clone(), |n| n.to_string_lossy().to_string())
+        }) else {
+            return;
+        };
+        let url = crate::search::url(&name);
+        if let Err(e) = std::process::Command::new("explorer").arg(&url).spawn() {
+            self.say(Kind::Err, format!("Ricerca non aperta: {e}"));
+        } else {
+            self.say(
+                Kind::Info,
+                format!("Cerco: {}", crate::search::query(&name)),
+            );
+        }
+    }
+
     fn open_folder(&mut self) {
         let dir = self.apps_dir();
         if let Err(e) = std::process::Command::new("explorer").arg(&dir).spawn() {
@@ -445,6 +465,7 @@ impl LiberApp {
         }
         let mut launch = None;
         let mut upd = None;
+        let mut search = None;
         let mut moved: Option<(usize, String)> = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             if self.rows.is_empty() {
@@ -465,9 +486,15 @@ impl LiberApp {
                 ui.add_space(4.0);
                 ui.label(RichText::new(cat).size(18.0).strong().color(theme::PRIMARY));
                 ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
-                    for &i in idx {
+                // Colonne calcolate a mano: le tessere riempiono la riga e non escono mai a destra.
+                let gap = 10.0;
+                let avail = ui.available_width() - 18.0;
+                let cols = (((avail + gap) / (230.0 + gap)).floor() as usize).max(1);
+                let tile_w = ((avail - gap * (cols as f32 - 1.0)) / cols as f32 - 24.0).max(150.0);
+                for row_idx in idx.chunks(cols) {
+                  ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+                    for &i in row_idx {
                         let Some(r) = self.rows.get(i) else {
                             continue;
                         };
@@ -478,7 +505,7 @@ impl LiberApp {
                             .inner_margin(egui::Margin::same(10))
                             .show(ui, |ui| {
                               ui.vertical(|ui| {
-                                ui.set_width(210.0);
+                                ui.set_width(tile_w);
                                 ui.horizontal(|ui| {
                                     let (rect, _) = ui.allocate_exact_size(egui::vec2(46.0, 46.0), egui::Sense::hover());
                                     ui.painter().rect_filled(rect, 12.0, avatar_color(&r.app.name));
@@ -500,6 +527,14 @@ impl LiberApp {
                                     if ui.add(start).clicked() {
                                         launch = Some(i);
                                     }
+                                    if r.app.entry.is_none()
+                                        && ui
+                                            .button("Cerca aggiornamento")
+                                            .on_hover_text(crate::search::query(&r.app.name))
+                                            .clicked()
+                                    {
+                                        search = Some(i);
+                                    }
                                     if Self::can_update(r)
                                         && ui.add_enabled(!self.busy, egui::Button::new("Aggiorna")).clicked()
                                     {
@@ -519,7 +554,8 @@ impl LiberApp {
                             });
                         });
                     }
-                });
+                  });
+                }
                 ui.add_space(8.0);
             }
         });
@@ -528,6 +564,9 @@ impl LiberApp {
         }
         if let Some(i) = upd {
             self.check(ctx, Some(i), true);
+        }
+        if let Some(i) = search {
+            self.search_update(i);
         }
         if let Some((i, c)) = moved {
             self.set_category(i, &c);
