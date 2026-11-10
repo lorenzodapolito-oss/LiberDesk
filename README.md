@@ -17,7 +17,7 @@ Programma Windows scritto in Rust (egui), un solo `.exe`, nessuna installazione.
 - **I tuoi dati restano**: cartelle `Data`, `Settings`, `Config`, `Profile`, `portable` e i file di impostazioni noti
   di ogni app non vengono toccati.
 - Si possono spegnere il controllo all'avvio e l'installazione automatica (il pulsante «Aggiorna» resta).
-- Sono supportati pacchetti `.zip` e file `.exe` singoli.
+- Sono supportati pacchetti `.zip`, `.7z` e file `.exe` singoli.
 
 ## Compilare
 ```

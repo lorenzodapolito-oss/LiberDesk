@@ -225,9 +225,9 @@ pub fn apply(
         .map(|n| n.to_string_lossy().to_string())
         .ok_or("Cartella dell'app non valida")?;
     let ext = extension(&asset.name);
-    if ext != "zip" && ext != "exe" {
+    if ext != "zip" && ext != "7z" && ext != "exe" {
         return Err(format!(
-            "Formato non supportato (.{ext}): serve uno zip o un file .exe"
+            "Formato non supportato (.{ext}): serve uno zip, un .7z o un file .exe"
         ));
     }
     let tmp = apps_dir.join("_temp").join(safe_name(&folder));
@@ -250,8 +250,12 @@ pub fn apply(
             ));
         }
         let new_dir = tmp.join("nuovo");
-        let root = if ext == "zip" {
-            archive::extract_zip(&file, &new_dir)?;
+        let root = if ext == "zip" || ext == "7z" {
+            if ext == "zip" {
+                archive::extract_zip(&file, &new_dir)?;
+            } else {
+                archive::extract_7z(&file, &new_dir)?;
+            }
             archive::content_root(&new_dir)
         } else {
             fs::create_dir_all(&new_dir).map_err(|e| e.to_string())?;
@@ -510,7 +514,7 @@ mod tests {
             .contains("incompleto"));
         // Formato non supportato.
         let a3 = Asset {
-            name: "x.7z".into(),
+            name: "x.rar".into(),
             browser_download_url: "https://x/ok.zip".into(),
             size: 0,
         };

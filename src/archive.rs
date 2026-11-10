@@ -44,6 +44,44 @@ pub fn extract_zip(zip_path: &Path, dest: &Path) -> Result<usize, String> {
     Ok(n)
 }
 
+/// Estrae un archivio `.7z` in `dest`, rifiutando i percorsi che escono dalla cartella.
+pub fn extract_7z(path: &Path, dest: &Path) -> Result<usize, String> {
+    fs::create_dir_all(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+    let mut n = 0usize;
+    let mut total = 0u64;
+    let root = dest.to_path_buf();
+    sevenz_rust::decompress_file_with_extract_fn(path, dest, |entry, reader, out| {
+        let name = entry.name();
+        if name.is_empty() {
+            return Ok(true);
+        }
+        let bad = name.starts_with(['/', '\\'])
+            || name.contains(':')
+            || name.split(['/', '\\']).any(|p| p == "..")
+            || !out.starts_with(&root);
+        if bad {
+            return Err(sevenz_rust::Error::other(format!(
+                "Percorso non sicuro nell'archivio: {name}"
+            )));
+        }
+        if n >= MAX_ENTRIES {
+            return Err(sevenz_rust::Error::other("L'archivio ha troppi file"));
+        }
+        total = total.saturating_add(entry.size());
+        if total > MAX_TOTAL {
+            return Err(sevenz_rust::Error::other(
+                "L'archivio è troppo grande una volta estratto",
+            ));
+        }
+        if !entry.is_directory() {
+            n += 1;
+        }
+        sevenz_rust::default_entry_extract_fn(entry, reader, out)
+    })
+    .map_err(|e| format!("Archivio .7z non valido: {e}"))?;
+    Ok(n)
+}
+
 /// Se lo zip contiene una sola cartella e nient'altro, la radice è quella cartella.
 pub fn content_root(dir: &Path) -> PathBuf {
     let mut cur = dir.to_path_buf();
@@ -144,6 +182,22 @@ pub(crate) mod tests {
         make_zip(&d.join("b.zip"), &[("a.exe", b"1"), ("b.dll", b"2")]);
         extract_zip(&d.join("b.zip"), &d.join("out2")).unwrap();
         assert_eq!(content_root(&d.join("out2")), d.join("out2"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn extracts_7z_archives() {
+        let d = tmp("sz");
+        fs::create_dir_all(d.join("src/sub")).unwrap();
+        fs::write(d.join("src/a.exe"), b"1").unwrap();
+        fs::write(d.join("src/sub/b.txt"), b"2").unwrap();
+        sevenz_rust::compress_to_path(d.join("src"), d.join("a.7z")).unwrap();
+        assert_eq!(extract_7z(&d.join("a.7z"), &d.join("out")).unwrap(), 2);
+        let root = content_root(&d.join("out"));
+        assert!(root.join("a.exe").is_file() || root.join("src/a.exe").is_file());
+        fs::write(d.join("rotto.7z"), b"non e 7z").unwrap();
+        assert!(extract_7z(&d.join("rotto.7z"), &d.join("o2")).is_err());
+        assert!(extract_7z(&d.join("manca.7z"), &d.join("o3")).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 

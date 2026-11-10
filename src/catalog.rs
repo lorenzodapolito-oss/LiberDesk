@@ -125,7 +125,7 @@ pub static CATALOG: &[Entry] = &[
         "Audacity.exe",
         ["Portable Settings"],
         "audacity/audacity",
-        r"(?i)^audacity-win-[\d.]+-64bit\.zip$"
+        r"(?i)^audacity-win-[\d.]+-x86_64\.7z$"
     ),
 ];
 
@@ -208,5 +208,8 @@ mod tests {
         assert!(m("rufus", "rufus-4.5.exe"));
         assert!(!m("rufus", "rufus-4.5p.exe"));
         assert!(m("ytdlp", "yt-dlp.exe"));
+        assert!(m("audacity", "audacity-win-4.0.2-x86_64.7z"));
+        assert!(!m("audacity", "audacity-win-4.0.2-arm64.7z"));
+        assert!(!m("audacity", "audacity-win-4.0.2-x86_64.msi"));
     }
 }
