@@ -10,6 +10,8 @@ pub struct State {
     pub version: Option<String>,
     /// Ultimo controllo (testo leggibile).
     pub checked: String,
+    /// Categoria scelta dall'utente (vince su quella del catalogo).
+    pub category: Option<String>,
 }
 
 pub const FILE: &str = "liberdesk.json";
@@ -39,6 +41,7 @@ mod tests {
         let s = State {
             version: Some("1.2".into()),
             checked: "ieri".into(),
+            category: Some("Giochi".into()),
         };
         save(&d, &s).unwrap();
         assert_eq!(load(&d), s);

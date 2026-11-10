@@ -292,9 +292,11 @@ pub fn apply(
                 Err(r) => Err(format!("{e}; ripristino non riuscito: {r}")),
             };
         }
+        let previous = state::load(&app.dir);
         let st = State {
             version: Some(latest.to_string()),
             checked: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+            category: previous.category,
         };
         state::save(&app.dir, &st)?;
         prune_backups(&backups, &prefix, 2);
@@ -369,7 +371,7 @@ mod tests {
         };
         let st = State {
             version: Some("8.7.1".into()),
-            checked: String::new(),
+            ..State::default()
         };
         assert_eq!(
             local_version(&app, &st, &P(Some("1.0"))).as_deref(),
@@ -425,6 +427,14 @@ mod tests {
         let h = http_with(&zip);
         let app = app_in(&d, "Notepad++");
         fs::write(app.dir.join("vecchio.dll"), b"x").unwrap();
+        state::save(
+            &app.dir,
+            &State {
+                category: Some("Giochi".into()),
+                ..State::default()
+            },
+        )
+        .unwrap();
         fs::create_dir_all(app.dir.join("Data")).unwrap();
         fs::write(app.dir.join("Data/mio.txt"), b"dati miei").unwrap();
         fs::write(app.dir.join("config.xml"), b"mie impostazioni").unwrap();
@@ -448,6 +458,7 @@ mod tests {
             b"mie impostazioni"
         );
         assert_eq!(state::load(&app.dir).version.as_deref(), Some("8.8.0"));
+        assert_eq!(state::load(&app.dir).category.as_deref(), Some("Giochi"));
         let backups: Vec<_> = fs::read_dir(d.join("_backup")).unwrap().flatten().collect();
         assert_eq!(backups.len(), 1);
         assert_eq!(
