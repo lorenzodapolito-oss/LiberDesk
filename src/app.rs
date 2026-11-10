@@ -5,7 +5,7 @@ use crate::net::{Http, RealHttp};
 use crate::scan::{self, App};
 use crate::state;
 use crate::theme;
-use crate::update::{self, Check, Kind, Probe, RealProbe};
+use crate::update::{self, Check, Kind, NoProbe, Probe, RealProbe};
 use eframe::egui::{self, Color32, RichText};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -40,6 +40,7 @@ enum Event {
     Log(Kind, String),
     Status(PathBuf, Status),
     Rescan,
+    Loaded(Vec<(App, state::State)>),
     Finished,
 }
 
@@ -60,6 +61,8 @@ pub struct LiberApp {
     log: Vec<(Color32, String)>,
     busy: bool,
     started: bool,
+    loading: bool,
+    pending_check: bool,
     tx: Sender<Event>,
     rx: Receiver<Event>,
     http: Arc<dyn Http>,
@@ -146,7 +149,7 @@ impl LiberApp {
         let cfg_path = base.join("liberdesk.json");
         let cfg = config::load(&cfg_path);
         let (tx, rx) = channel();
-        let mut s = Self {
+        let s = Self {
             base,
             cfg_path,
             cfg,
@@ -156,6 +159,8 @@ impl LiberApp {
             log: Vec::new(),
             busy: false,
             started: false,
+            loading: false,
+            pending_check: false,
             tx,
             rx,
             http: Arc::new(RealHttp::new()),
@@ -163,7 +168,6 @@ impl LiberApp {
         };
         let dir = s.apps_dir();
         let _ = std::fs::create_dir_all(&dir);
-        s.rescan();
         s
     }
 
@@ -186,17 +190,27 @@ impl LiberApp {
 
     /// Rilegge la cartella delle app, tenendo gli stati già noti.
     fn rescan(&mut self) {
+        let apps = scan::scan(&self.apps_dir());
+        let loaded = apps
+            .into_iter()
+            .map(|a| {
+                let st = state::load(&a.dir);
+                (a, st)
+            })
+            .collect();
+        self.build_rows(loaded);
+    }
+
+    fn build_rows(&mut self, loaded: Vec<(App, state::State)>) {
         let old: Vec<(PathBuf, Status)> = self
             .rows
             .iter()
             .map(|r| (r.app.dir.clone(), r.status.clone()))
             .collect();
-        let apps = scan::scan(&self.apps_dir());
-        self.rows = apps
+        self.rows = loaded
             .into_iter()
-            .map(|app| {
-                let st = state::load(&app.dir);
-                let local = update::local_version(&app, &st, &*self.probe);
+            .map(|(app, st)| {
+                let local = update::local_version(&app, &st, &NoProbe);
                 let status = old
                     .iter()
                     .find(|(d, _)| *d == app.dir)
@@ -212,6 +226,25 @@ impl LiberApp {
             .collect();
     }
 
+    /// Legge la cartella delle app in un altro thread, così la finestra si apre subito.
+    fn load_async(&mut self, ctx: &egui::Context) {
+        self.loading = true;
+        let dir = self.apps_dir();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let loaded = scan::scan(&dir)
+                .into_iter()
+                .map(|a| {
+                    let st = state::load(&a.dir);
+                    (a, st)
+                })
+                .collect();
+            let _ = tx.send(Event::Loaded(loaded));
+            ctx.request_repaint();
+        });
+    }
+
     fn pump(&mut self) {
         let mut rescan = false;
         while let Ok(ev) = self.rx.try_recv() {
@@ -223,6 +256,10 @@ impl LiberApp {
                     }
                 }
                 Event::Rescan => rescan = true,
+                Event::Loaded(l) => {
+                    self.build_rows(l);
+                    self.loading = false;
+                }
                 Event::Finished => self.busy = false,
             }
         }
@@ -270,6 +307,7 @@ impl LiberApp {
             }
         }
         let http = Arc::clone(&self.http);
+        let probe = Arc::clone(&self.probe);
         let explicit = only.is_some();
         self.spawn(ctx, move |tx| {
             let log = |k: Kind, m: String| {
@@ -277,6 +315,10 @@ impl LiberApp {
             };
             let mut changed = false;
             for (app, local) in targets {
+                // La versione dall'eseguibile si legge qui, fuori dall'interfaccia.
+                let local = local.or_else(|| {
+                    app.exe.as_ref().and_then(|e| probe.file_version(e))
+                });
                 let res = update::check(&*http, &app, local.as_deref());
                 match &res {
                     Check::Current(v) => log(Kind::Info, format!("{}: già aggiornata ({v})", app.name)),
@@ -468,7 +510,10 @@ impl LiberApp {
         let mut search = None;
         let mut moved: Option<(usize, String)> = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            if self.rows.is_empty() {
+            if self.rows.is_empty() && self.loading {
+                ui.add_space(20.0);
+                ui.label(RichText::new("Leggo la cartella delle app…").size(16.0).color(theme::MUTED));
+            } else if self.rows.is_empty() {
                 ui.add_space(20.0);
                 ui.label(
                     RichText::new(format!(
@@ -580,11 +625,14 @@ impl eframe::App for LiberApp {
         let ctx = ui.ctx().clone();
         if !self.started {
             self.started = true;
-            if self.cfg.auto_check {
-                self.say(Kind::Info, "Controllo gli aggiornamenti…");
-                let install = self.cfg.auto_install;
-                self.check(&ctx, None, install);
-            }
+            self.pending_check = self.cfg.auto_check;
+            self.load_async(&ctx);
+        }
+        if self.pending_check && !self.loading {
+            self.pending_check = false;
+            self.say(Kind::Info, "Controllo gli aggiornamenti…");
+            let install = self.cfg.auto_install;
+            self.check(&ctx, None, install);
         }
         egui::Panel::top("top").show(ui, |ui| {
             ui.add_space(6.0);
@@ -679,7 +727,7 @@ impl eframe::App for LiberApp {
             .default_size(170.0)
             .show(ui, |ui| self.side(ui));
         egui::CentralPanel::default().show(ui, |ui| self.list(ui, &ctx));
-        if self.busy {
+        if self.busy || self.loading {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }
     }

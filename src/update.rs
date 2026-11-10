@@ -78,7 +78,20 @@ pub fn local_version(app: &App, st: &State, probe: &dyn Probe) -> Option<String>
             let name = app.dir.file_name()?.to_string_lossy().to_string();
             version::from_folder_name(&name)
         })
-        .or_else(|| app.exe.as_ref().and_then(|e| probe.file_version(e)))
+        .or_else(|| {
+            // Leggere la versione dall'eseguibile è lento: solo per le app che si aggiornano.
+            app.entry?;
+            app.exe.as_ref().and_then(|e| probe.file_version(e))
+        })
+}
+
+/// Non legge nulla: per aprire l'elenco subito, senza lanciare programmi esterni.
+pub struct NoProbe;
+
+impl Probe for NoProbe {
+    fn file_version(&self, _exe: &Path) -> Option<String> {
+        None
+    }
 }
 
 pub fn check(http: &dyn Http, app: &App, local: Option<&str>) -> Check {
@@ -402,9 +415,10 @@ mod tests {
             Some("2.7.11")
         );
         let other = App { entry: None, ..kp };
+        // Le app senza aggiornamenti automatici non lanciano mai la lettura dell'eseguibile.
         assert_eq!(
-            local_version(&other, &State::default(), &P(Some("9.9"))).as_deref(),
-            Some("9.9")
+            local_version(&other, &State::default(), &P(Some("9.9"))),
+            None
         );
         let _ = fs::remove_dir_all(&d);
     }
