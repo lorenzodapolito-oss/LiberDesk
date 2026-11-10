@@ -124,27 +124,38 @@ fn make_app(name: String, dir: PathBuf, root: &Path, category: Option<&str>) -> 
     })
 }
 
-/// Elenco delle app, in ordine alfabetico. Una cartella senza `.exe` propri che contiene
-/// altri programmi è una categoria: le app che ci stanno dentro ne prendono il nome.
-pub fn scan(apps_dir: &Path) -> Vec<App> {
-    let mut apps = Vec::new();
-    for (name, dir) in subdirs(apps_dir) {
+/// Quanti livelli di cartelle di categoria si accettano (`Categoria\\Sottocategoria\\Programma`).
+const MAX_CATEGORY_LEVELS: usize = 2;
+pub const SEPARATOR: &str = " › ";
+
+fn walk(dir: &Path, labels: &mut Vec<String>, root: &Path, out: &mut Vec<App>) {
+    for (name, d) in subdirs(dir) {
         let known = catalog::find_for_folder(&name).is_some();
-        let children: Vec<(String, PathBuf)> = subdirs(&dir)
+        let children: Vec<(String, PathBuf)> = subdirs(&d)
             .into_iter()
             .filter(|(n, _)| !GENERIC_SUBDIRS.contains(&n.to_lowercase().as_str()))
             .collect();
         let is_category = !known
-            && !has_direct_exe(&dir)
-            && children.iter().any(|(_, d)| find_exe(d, None).is_some());
+            && labels.len() < MAX_CATEGORY_LEVELS
+            && !has_direct_exe(&d)
+            && children.iter().any(|(_, c)| find_exe(c, None).is_some());
         if is_category {
-            for (cname, cdir) in children {
-                apps.extend(make_app(cname, cdir, apps_dir, Some(&name)));
-            }
+            labels.push(name);
+            walk(&d, labels, root, out);
+            labels.pop();
         } else {
-            apps.extend(make_app(name, dir, apps_dir, None));
+            let cat = (!labels.is_empty()).then(|| labels.join(SEPARATOR));
+            out.extend(make_app(name, d, root, cat.as_deref()));
         }
     }
+}
+
+/// Elenco delle app, in ordine alfabetico. Una cartella senza `.exe` propri che contiene
+/// altri programmi è una categoria (anche annidata, fino a due livelli): le app che ci stanno
+/// dentro ne prendono il nome, es. `Video › Editor`.
+pub fn scan(apps_dir: &Path) -> Vec<App> {
+    let mut apps = Vec::new();
+    walk(apps_dir, &mut Vec::new(), apps_dir, &mut apps);
     apps.sort_by_key(|a| a.name.to_lowercase());
     apps
 }
@@ -248,6 +259,35 @@ mod tests {
         assert_eq!(get("OBS Studio").unwrap().folder_category, None);
         assert_eq!(get("Piatta").unwrap().folder_category, None);
         assert!(apps.iter().all(|a| a.root == d));
+        assert_eq!(apps.len(), 6);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn nested_categories_become_a_path() {
+        let d = tmp("nest");
+        file(&d.join("Video/Editor/VirtualDub/vdub.exe"), 10);
+        file(&d.join("Video/Editor/Avidemux/avidemux.exe"), 10);
+        file(&d.join("Video/Riproduttore/MPC/mpc.exe"), 10);
+        file(&d.join("Video/XMediaRecode3271/XMedia Recode.exe"), 10);
+        file(&d.join("Utilità di sistema/Strumenti/Tool A/a.exe"), 10);
+        file(&d.join("XnConvertPortable/XnConvertPortable.exe"), 10);
+        file(&d.join("XnConvertPortable/App/XnConvert/xnconvert.exe"), 10);
+        file(&d.join("XnConvertPortable/Data/x.ini"), 1);
+        let apps = scan(&d);
+        let cat = |n: &str| {
+            apps.iter()
+                .find(|a| a.name == n)
+                .map(|a| a.folder_category.clone())
+        };
+        assert_eq!(cat("VirtualDub"), Some(Some("Video › Editor".to_string())));
+        assert_eq!(cat("MPC"), Some(Some("Video › Riproduttore".to_string())));
+        assert_eq!(cat("XMediaRecode3271"), Some(Some("Video".to_string())));
+        assert_eq!(
+            cat("Tool A"),
+            Some(Some("Utilità di sistema › Strumenti".to_string()))
+        );
+        assert_eq!(cat("XnConvertPortable"), Some(None));
         assert_eq!(apps.len(), 6);
         let _ = fs::remove_dir_all(&d);
     }

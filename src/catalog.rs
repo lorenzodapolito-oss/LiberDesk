@@ -38,7 +38,7 @@ pub static CATALOG: &[Entry] = &[
     gh!(
         "Notepad++",
         "Ufficio",
-        ["notepad", "notepadplusplus", "npp"],
+        ["notepad++", "notepadplusplus", "npp"],
         "notepad++.exe",
         [
             "config.xml",
@@ -132,12 +132,13 @@ pub static CATALOG: &[Entry] = &[
 /// Solo lettere e cifre minuscole: per confrontare i nomi delle cartelle.
 pub fn normalize(s: &str) -> String {
     s.chars()
-        .filter(|c| c.is_alphanumeric())
+        .filter(|c| c.is_alphanumeric() || *c == '+')
         .flat_map(char::to_lowercase)
         .collect()
 }
 
-/// Voce del catalogo per il nome di una cartella (uguale a un alias o che comincia con esso).
+/// Voce del catalogo per il nome di una cartella: uguale a un alias, oppure alias seguito dalla
+/// versione (`Rufus 2.11`, `KeePassXC-2.7.11-Win64`, `qbittorrent_4.6.3_x64`).
 pub fn find_for_folder(folder: &str) -> Option<&'static Entry> {
     let n = normalize(folder);
     if n.is_empty() {
@@ -145,7 +146,9 @@ pub fn find_for_folder(folder: &str) -> Option<&'static Entry> {
     }
     CATALOG.iter().find(|e| {
         e.aliases.iter().any(|a| {
-            n == *a || (n.starts_with(a) && n[a.len()..].chars().all(|c| c.is_ascii_digit()))
+            n == *a
+                || n.strip_prefix(a)
+                    .is_some_and(|rest| rest.chars().next().is_some_and(|c| c.is_ascii_digit()))
         })
     })
 }
@@ -176,6 +179,14 @@ mod tests {
             find_for_folder("Notepad++").map(|e| e.name),
             Some("Notepad++")
         );
+        assert!(find_for_folder("Notepad2").is_none());
+        assert!(find_for_folder("Notepad").is_none());
+        assert_eq!(
+            find_for_folder("KeePassXC-2.7.11-Win64").map(|e| e.name),
+            Some("KeePassXC")
+        );
+        assert_eq!(find_for_folder("Rufus 2.11").map(|e| e.name), Some("Rufus"));
+        assert!(find_for_folder("OBSPortable").is_none());
         assert_eq!(
             find_for_folder("KeePassXC 2").map(|e| e.name),
             Some("KeePassXC")
@@ -200,8 +211,8 @@ mod tests {
                 })
                 .unwrap_or(false)
         };
-        assert!(m("notepad", "npp.8.7.1.portable.x64.zip"));
-        assert!(!m("notepad", "npp.8.7.1.Installer.x64.exe"));
+        assert!(m("notepad++", "npp.8.7.1.portable.x64.zip"));
+        assert!(!m("notepad++", "npp.8.7.1.Installer.x64.exe"));
         assert!(m("keepassxc", "KeePassXC-2.7.9-Win64.zip"));
         assert!(!m("keepassxc", "KeePassXC-2.7.9-Win64.msi"));
         assert!(m("sharex", "ShareX-16.1.0-portable.zip"));

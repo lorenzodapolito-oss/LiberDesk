@@ -102,6 +102,11 @@ pub fn category_of(app: &App, st: &state::State) -> String {
         .unwrap_or_else(|| "Altro".to_string())
 }
 
+/// Categoria principale (`Video › Editor` -> `Video`).
+fn main_of(c: &str) -> &str {
+    c.split(crate::scan::SEPARATOR).next().unwrap_or(c)
+}
+
 /// Posizione di una categoria: quelle note nel loro ordine, le altre in ordine alfabetico,
 /// «Altro» per ultima.
 fn rank(c: &str) -> (u8, usize, String) {
@@ -118,7 +123,7 @@ fn rank(c: &str) -> (u8, usize, String) {
 fn group(rows: &[(String, String)], filter: &str) -> Vec<(String, Vec<usize>)> {
     let f = filter.trim().to_lowercase();
     let mut cats: Vec<&String> = rows.iter().map(|(c, _)| c).collect();
-    cats.sort_by_key(|c| rank(c));
+    cats.sort_by_key(|c| (rank(main_of(c)), c.to_lowercase()));
     cats.dedup();
     cats.into_iter()
         .filter_map(|c| {
@@ -400,7 +405,15 @@ impl LiberApp {
             .iter()
             .map(|r| (r.category.clone(), r.app.name.clone()))
             .collect();
-        let groups = group(&pairs, "");
+        let mut mains: Vec<(String, usize)> = Vec::new();
+        for (c, _) in &pairs {
+            let m = main_of(c).to_string();
+            match mains.iter_mut().find(|(x, _)| *x == m) {
+                Some((_, n)) => *n += 1,
+                None => mains.push((m, 1)),
+            }
+        }
+        mains.sort_by_key(|(m, _)| rank(m));
         ui.add_space(6.0);
         ui.label(RichText::new("Categorie").strong().color(theme::MUTED));
         if ui
@@ -409,12 +422,9 @@ impl LiberApp {
         {
             self.cat = None;
         }
-        for (c, idx) in &groups {
+        for (c, n) in &mains {
             let sel = self.cat.as_deref() == Some(c.as_str());
-            if ui
-                .selectable_label(sel, format!("{c} ({})", idx.len()))
-                .clicked()
-            {
+            if ui.selectable_label(sel, format!("{c} ({n})")).clicked() {
                 self.cat = Some(c.clone());
             }
         }
@@ -449,7 +459,7 @@ impl LiberApp {
                 );
             }
             for (cat, idx) in &groups {
-                if self.cat.as_deref().is_some_and(|c| c != cat) {
+                if self.cat.as_deref().is_some_and(|c| c != main_of(cat)) {
                     continue;
                 }
                 ui.add_space(4.0);
@@ -715,6 +725,19 @@ mod tests {
         ];
         let n: Vec<_> = group(&r2, "").into_iter().map(|(c, _)| c).collect();
         assert_eq!(n, vec!["Sistema", "Beta", "Zeta", "Altro"]);
+        let r3 = vec![
+            ("Video › Editor".to_string(), "A".to_string()),
+            ("Audio".to_string(), "B".to_string()),
+            ("Video".to_string(), "C".to_string()),
+            ("Video › Riproduttore".to_string(), "D".to_string()),
+        ];
+        let n: Vec<_> = group(&r3, "").into_iter().map(|(c, _)| c).collect();
+        assert_eq!(
+            n,
+            vec!["Audio", "Video", "Video › Editor", "Video › Riproduttore"]
+        );
+        assert_eq!(main_of("Video › Editor"), "Video");
+        assert_eq!(main_of("Audio"), "Audio");
     }
 
     #[test]
