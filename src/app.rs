@@ -62,12 +62,12 @@ fn kind_color(k: Kind) -> Color32 {
 /// Colore pastello dell'iniziale, scelto dal nome.
 fn avatar_color(name: &str) -> Color32 {
     const COLORS: [Color32; 6] = [
-        Color32::from_rgb(0xA7, 0xF3, 0xD0),
-        Color32::from_rgb(0xFF, 0xD6, 0xA5),
+        Color32::from_rgb(0xFF, 0xB3, 0xDE),
+        Color32::from_rgb(0xB7, 0xC4, 0xFF),
         Color32::from_rgb(0xC4, 0xB5, 0xFD),
         Color32::from_rgb(0xFF, 0xB7, 0xC5),
         Color32::from_rgb(0xA5, 0xD8, 0xFF),
-        Color32::from_rgb(0xFD, 0xF0, 0xA0),
+        Color32::from_rgb(0xD9, 0xC2, 0xFF),
     ];
     let h = name.bytes().fold(7usize, |a, b| {
         a.wrapping_mul(31).wrapping_add(usize::from(b))
