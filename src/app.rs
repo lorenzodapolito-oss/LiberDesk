@@ -400,7 +400,11 @@ impl LiberApp {
             return;
         };
         let url = crate::search::url(&name);
-        if let Err(e) = std::process::Command::new("explorer").arg(&url).spawn() {
+        // `explorer <indirizzo>` apre Documenti: per i siti serve il gestore dei collegamenti.
+        if let Err(e) = std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url.as_str()])
+            .spawn()
+        {
             self.say(Kind::Err, format!("Ricerca non aperta: {e}"));
         } else {
             self.say(
