@@ -1,12 +1,13 @@
 //! Interfaccia: elenco delle app, controllo e aggiornamento all'avvio, registro.
 
 use crate::config::{self, Config};
-use crate::inst_ui::InstApp;
+use crate::inst_ui::{assoc_dialog, Assoc, AssocAct, InstApp};
 use crate::net::{Http, RealHttp};
 use crate::scan::{self, App};
 use crate::state;
 use crate::theme;
 use crate::update::{self, Check, Kind, NoProbe, Probe, RealProbe};
+use crate::winget::{self, Pkg, RealRunner, Runner};
 use eframe::egui::{self, Color32, RichText};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -42,6 +43,7 @@ enum Event {
     Status(PathBuf, Status),
     Rescan,
     Loaded(Vec<(App, state::State)>),
+    Found(Result<Vec<Pkg>, String>),
     Finished,
 }
 
@@ -49,6 +51,7 @@ struct Row {
     app: App,
     category: String,
     local: Option<String>,
+    winget: Option<String>,
     status: Status,
 }
 
@@ -60,6 +63,8 @@ enum Mode {
 
 pub struct LiberApp {
     mode: Mode,
+    runner: Arc<dyn Runner>,
+    assoc: Option<Assoc>,
     inst: InstApp,
     inst_pending: bool,
     base: PathBuf,
@@ -77,6 +82,10 @@ pub struct LiberApp {
     rx: Receiver<Event>,
     http: Arc<dyn Http>,
     probe: Arc<dyn Probe>,
+}
+
+fn r_has_winget(rows: &[Row], i: usize) -> bool {
+    rows.get(i).is_some_and(|r| r.winget.is_some())
 }
 
 pub(crate) fn kind_color(k: Kind) -> Color32 {
@@ -162,6 +171,8 @@ impl LiberApp {
         let inst = InstApp::new(cfg.effective_installers_dir(&base));
         let s = Self {
             mode: Mode::Portable,
+            runner: Arc::new(RealRunner),
+            assoc: None,
             inst,
             inst_pending: true,
             base,
@@ -231,6 +242,7 @@ impl LiberApp {
                     .map_or(Status::Unchecked, |(_, s)| s.clone());
                 let category = category_of(&app, &st);
                 Row {
+                    winget: st.winget_id.clone(),
                     app,
                     category,
                     local,
@@ -270,6 +282,11 @@ impl LiberApp {
                     }
                 }
                 Event::Rescan => rescan = true,
+                Event::Found(res) => {
+                    if let Some(a) = &mut self.assoc {
+                        a.found(res);
+                    }
+                }
                 Event::Loaded(l) => {
                     self.build_rows(l);
                     self.loading = false;
@@ -295,12 +312,14 @@ impl LiberApp {
 
     /// Controlla le app indicate; se `install`, scarica e installa quelle con una versione nuova.
     fn check(&mut self, ctx: &egui::Context, only: Option<usize>, install: bool) {
-        let targets: Vec<(App, Option<String>)> = self
+        let targets: Vec<(App, Option<String>, Option<String>)> = self
             .rows
             .iter()
             .enumerate()
-            .filter(|(i, r)| only.is_none_or(|o| o == *i) && r.app.entry.is_some())
-            .map(|(_, r)| (r.app.clone(), r.local.clone()))
+            .filter(|(i, r)| {
+                only.is_none_or(|o| o == *i) && (r.app.entry.is_some() || r.winget.is_some())
+            })
+            .map(|(_, r)| (r.app.clone(), r.local.clone(), r.winget.clone()))
             .collect();
         if targets.is_empty() {
             self.say(Kind::Info, "Nessuna app con aggiornamenti automatici.");
@@ -316,30 +335,50 @@ impl LiberApp {
             ),
         );
         for r in &mut self.rows {
-            if targets.iter().any(|(a, _)| a.dir == r.app.dir) {
+            if targets.iter().any(|(a, _, _)| a.dir == r.app.dir) {
                 r.status = Status::Checking;
             }
         }
         let http = Arc::clone(&self.http);
         let probe = Arc::clone(&self.probe);
+        let runner = Arc::clone(&self.runner);
         let explicit = only.is_some();
         self.spawn(ctx, move |tx| {
             let log = |k: Kind, m: String| {
                 let _ = tx.send(Event::Log(k, m));
             };
             let mut changed = false;
-            for (app, local) in targets {
+            let mut wg_ok: Option<bool> = None;
+            for (app, local, wid) in targets {
                 // La versione dall'eseguibile si legge qui, fuori dall'interfaccia.
                 let local = local.or_else(|| {
                     app.exe.as_ref().and_then(|e| probe.file_version(e))
                 });
-                let res = update::check(&*http, &app, local.as_deref());
+                let res = match (&app.entry, &wid) {
+                    (None, Some(id)) => {
+                        let ok = *wg_ok.get_or_insert_with(|| winget::available(&*runner));
+                        if ok {
+                            update::winget_check(&*runner, id, local.as_deref())
+                        } else {
+                            Check::Error("winget non disponibile su questo PC".into())
+                        }
+                    }
+                    _ => update::check(&*http, &app, local.as_deref()),
+                };
                 match &res {
                     Check::Current(v) => log(Kind::Info, format!("{}: già aggiornata ({v})", app.name)),
                     Check::Available { latest, .. } => log(
                         Kind::Info,
                         format!(
                             "{}: nuova versione {latest} (hai {})",
+                            app.name,
+                            local.as_deref().unwrap_or("?")
+                        ),
+                    ),
+                    Check::Winget { latest, .. } => log(
+                        Kind::Info,
+                        format!(
+                            "{}: nuova versione {latest} su winget (hai {})",
                             app.name,
                             local.as_deref().unwrap_or("?")
                         ),
@@ -356,6 +395,27 @@ impl LiberApp {
                 let st = Status::Result(res.clone());
                 let _ = tx.send(Event::Status(app.dir.clone(), st));
                 let (latest, asset, ok) = match res {
+                    Check::Winget { latest, known } => {
+                        if !(install && (known || explicit)) {
+                            continue;
+                        }
+                        let id = wid.clone().unwrap_or_default();
+                        let _ = tx.send(Event::Status(app.dir.clone(), Status::Updating));
+                        let mut l = |k: Kind, m: &str| {
+                            let _ = tx.send(Event::Log(k, m.to_string()));
+                        };
+                        match update::winget_apply(&*runner, &app, local.as_deref(), &latest, &id, &mut l) {
+                            Ok(()) => {
+                                changed = true;
+                                let _ = tx.send(Event::Status(app.dir.clone(), Status::Done(latest)));
+                            }
+                            Err(e) => {
+                                log(Kind::Err, format!("{}: {e}", app.name));
+                                let _ = tx.send(Event::Status(app.dir.clone(), Status::Result(Check::Error(e))));
+                            }
+                        }
+                        continue;
+                    }
                     Check::Available { latest, asset } => (latest, asset, true),
                     // Con la versione sconosciuta si installa solo se l'utente lo chiede.
                     Check::Unknown { latest, asset } => (latest, asset, explicit),
@@ -437,10 +497,13 @@ impl LiberApp {
 
     fn status_text(r: &Row) -> (String, Color32) {
         match &r.status {
-            Status::Unchecked => match r.app.entry {
-                Some(_) => ("Da controllare".into(), theme::MUTED),
-                None => ("Senza aggiornamenti automatici".into(), theme::MUTED),
-            },
+            Status::Unchecked => {
+                if r.app.entry.is_some() || r.winget.is_some() {
+                    ("Da controllare".into(), theme::MUTED)
+                } else {
+                    ("Senza aggiornamenti automatici".into(), theme::MUTED)
+                }
+            }
             Status::Checking => ("Controllo…".into(), theme::SCAN),
             Status::Updating => ("Aggiorno…".into(), theme::INSTALL),
             Status::Done(v) => (format!("Aggiornata alla {v}"), theme::OK),
@@ -450,6 +513,14 @@ impl LiberApp {
                 Check::Available { latest, .. } => {
                     (format!("Nuova versione {latest}"), theme::WARN)
                 }
+                Check::Winget { latest, known } => (
+                    if *known {
+                        format!("Nuova versione {latest} (winget)")
+                    } else {
+                        format!("Versione {latest} disponibile (la tua non è nota)")
+                    },
+                    theme::WARN,
+                ),
                 Check::Unknown { latest, .. } => (
                     format!("Versione {latest} disponibile (la tua non è nota)"),
                     theme::WARN,
@@ -462,8 +533,52 @@ impl LiberApp {
     fn can_update(r: &Row) -> bool {
         matches!(
             r.status,
-            Status::Result(Check::Available { .. } | Check::Unknown { .. })
+            Status::Result(Check::Available { .. } | Check::Unknown { .. } | Check::Winget { .. })
         )
+    }
+
+    fn set_winget(&mut self, idx: usize, id: Option<String>) {
+        let Some(r) = self.rows.get_mut(idx) else {
+            return;
+        };
+        let mut st = state::load(&r.app.dir);
+        st.winget_id = id.clone();
+        r.winget = id;
+        let dir = r.app.dir.clone();
+        if let Err(e) = state::save(&dir, &st) {
+            self.say(Kind::Err, format!("Associazione non salvata: {e}"));
+        }
+    }
+
+    /// Finestra «Associa a winget» delle app portabili.
+    fn assoc_window(&mut self, ctx: &egui::Context) {
+        let Some(a) = &mut self.assoc else {
+            return;
+        };
+        let name = self
+            .rows
+            .get(a.idx)
+            .map(|r| r.app.name.clone())
+            .unwrap_or_default();
+        let idx = a.idx;
+        match assoc_dialog(ctx, a, &name) {
+            AssocAct::Search(q) => {
+                let runner = Arc::clone(&self.runner);
+                let tx = self.tx.clone();
+                let c = ctx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(Event::Found(winget::search(&*runner, &q)));
+                    c.request_repaint();
+                });
+            }
+            AssocAct::Choose(id) => {
+                self.set_winget(idx, Some(id.clone()));
+                self.say(Kind::Ok, format!("{name}: associato a winget ({id})"));
+                self.assoc = None;
+            }
+            AssocAct::Close => self.assoc = None,
+            AssocAct::None => {}
+        }
     }
 
     fn set_category(&mut self, idx: usize, cat: &str) {
@@ -527,6 +642,7 @@ impl LiberApp {
         let mut upd = None;
         let mut search = None;
         let mut moved: Option<(usize, String)> = None;
+        let mut assoc: Option<(usize, bool)> = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             if self.rows.is_empty() && self.loading {
                 ui.add_space(20.0);
@@ -591,6 +707,7 @@ impl LiberApp {
                                         launch = Some(i);
                                     }
                                     if r.app.entry.is_none()
+                                        && r.winget.is_none()
                                         && ui
                                             .button("Cerca aggiornamento")
                                             .on_hover_text(crate::search::query(&r.app.name))
@@ -607,6 +724,14 @@ impl LiberApp {
                             });
                             });
                         tile.response.context_menu(|ui| {
+                            if ui.button("Associa a winget…").clicked() {
+                                assoc = Some((i, true));
+                                ui.close();
+                            }
+                            if r_has_winget(&self.rows, i) && ui.button("Togli l'associazione winget").clicked() {
+                                assoc = Some((i, false));
+                                ui.close();
+                            }
                             ui.menu_button("Sposta in…", |ui| {
                                 for c in &all_cats {
                                     if ui.button(c).clicked() {
@@ -633,6 +758,16 @@ impl LiberApp {
         }
         if let Some((i, c)) = moved {
             self.set_category(i, &c);
+        }
+        if let Some((i, add)) = assoc {
+            if add {
+                if let Some(r) = self.rows.get(i) {
+                    let q = crate::search::query(&r.app.name);
+                    self.assoc = Some(Assoc::new(i, q));
+                }
+            } else {
+                self.set_winget(i, None);
+            }
         }
     }
 }
@@ -823,6 +958,7 @@ impl eframe::App for LiberApp {
             Mode::Installers => self.inst.list(ui, &ctx),
         });
         self.inst.windows(&ctx);
+        self.assoc_window(&ctx);
         if self.busy || self.loading || self.inst.busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }
@@ -836,6 +972,7 @@ mod tests {
 
     fn row(status: Status) -> Row {
         Row {
+            winget: None,
             app: App {
                 name: "X".into(),
                 dir: PathBuf::from("X"),

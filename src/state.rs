@@ -12,6 +12,8 @@ pub struct State {
     pub checked: String,
     /// Categoria scelta dall'utente (vince su quella del catalogo).
     pub category: Option<String>,
+    /// Pacchetto winget scelto dall'utente per controllare l'ultima versione.
+    pub winget_id: Option<String>,
 }
 
 pub const FILE: &str = "liberdesk.json";
@@ -42,6 +44,7 @@ mod tests {
             version: Some("1.2".into()),
             checked: "ieri".into(),
             category: Some("Giochi".into()),
+            winget_id: Some("A.B".into()),
         };
         save(&d, &s).unwrap();
         assert_eq!(load(&d), s);

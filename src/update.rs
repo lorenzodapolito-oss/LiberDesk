@@ -7,6 +7,7 @@ use crate::net::Http;
 use crate::scan::App;
 use crate::state::{self, State};
 use crate::version;
+use crate::winget::{self, Runner};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -31,6 +32,11 @@ pub enum Check {
     Unknown {
         latest: String,
         asset: Asset,
+    },
+    /// Versione più nuova trovata con winget; `known` = la versione installata è nota.
+    Winget {
+        latest: String,
+        known: bool,
     },
     Error(String),
 }
@@ -74,13 +80,17 @@ pub fn local_version(app: &App, st: &State, probe: &dyn Probe) -> Option<String>
         .clone()
         .filter(|v| !version::segments(v).is_empty())
         .or_else(|| {
-            app.entry?;
+            if app.entry.is_none() && st.winget_id.is_none() {
+                return None;
+            }
             let name = app.dir.file_name()?.to_string_lossy().to_string();
             version::from_folder_name(&name)
         })
         .or_else(|| {
             // Leggere la versione dall'eseguibile è lento: solo per le app che si aggiornano.
-            app.entry?;
+            if app.entry.is_none() && st.winget_id.is_none() {
+                return None;
+            }
             app.exe.as_ref().and_then(|e| probe.file_version(e))
         })
 }
@@ -224,6 +234,150 @@ fn extension(name: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Controlla con winget l'ultima versione di un'app portabile.
+pub fn winget_check(r: &dyn Runner, id: &str, local: Option<&str>) -> Check {
+    match winget::latest(r, id) {
+        Err(e) => Check::Error(e),
+        Ok(None) => Check::Error(format!("winget non trova «{id}»")),
+        Ok(Some(latest)) => match local {
+            Some(l) if !version::is_newer(&latest, l) => Check::Current(l.to_string()),
+            Some(_) => Check::Winget {
+                latest,
+                known: true,
+            },
+            None => Check::Winget {
+                latest,
+                known: false,
+            },
+        },
+    }
+}
+
+/// Scarica con winget e sostituisce l'app, ma solo se il pacchetto è portabile (zip o exe «portable»).
+pub fn winget_apply(
+    r: &dyn Runner,
+    app: &App,
+    local: Option<&str>,
+    latest: &str,
+    id: &str,
+    log: &mut dyn FnMut(Kind, &str),
+) -> Result<(), String> {
+    let folder = app
+        .dir
+        .strip_prefix(&app.root)
+        .map_err(|_| "Cartella dell'app non valida".to_string())?
+        .to_string_lossy()
+        .to_string();
+    let tmp = app.root.join("_temp").join(safe_name(&folder));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    let result = (|| -> Result<(), String> {
+        log(
+            Kind::Info,
+            &format!("{}: scarico con winget ({id})…", app.name),
+        );
+        let got = winget::download_any(r, id, &tmp.join("winget"))?;
+        let name = got
+            .file
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let ext = extension(&name);
+        if !winget::is_portable_package(&ext, got.kind.as_deref()) {
+            return Err(format!(
+                "winget offre solo un installer ({}), non una versione portabile: scaricala a mano",
+                got.kind.as_deref().unwrap_or(&ext)
+            ));
+        }
+        install_from(app, local, latest, &got.file, &ext, &name, &tmp, log)
+    })();
+    let _ = fs::remove_dir_all(&tmp);
+    result?;
+    log(
+        Kind::Ok,
+        &format!("{}: aggiornata alla versione {latest}", app.name),
+    );
+    Ok(())
+}
+
+/// Sostituisce l'app con il file scaricato (zip, 7z o exe), con copia di sicurezza e ripristino.
+#[allow(clippy::too_many_arguments)]
+fn install_from(
+    app: &App,
+    local: Option<&str>,
+    latest: &str,
+    file: &Path,
+    ext: &str,
+    asset_name: &str,
+    tmp: &Path,
+    log: &mut dyn FnMut(Kind, &str),
+) -> Result<(), String> {
+    let apps_dir = app.root.clone();
+    let folder = app
+        .dir
+        .strip_prefix(&app.root)
+        .map_err(|_| "Cartella dell'app non valida".to_string())?
+        .to_string_lossy()
+        .to_string();
+    let new_dir = tmp.join("nuovo");
+    let root = if ext == "zip" || ext == "7z" {
+        if ext == "zip" {
+            archive::extract_zip(file, &new_dir)?;
+        } else {
+            archive::extract_7z(file, &new_dir)?;
+        }
+        archive::content_root(&new_dir)
+    } else {
+        fs::create_dir_all(&new_dir).map_err(|e| e.to_string())?;
+        fs::copy(file, new_dir.join(asset_name)).map_err(|e| e.to_string())?;
+        new_dir.clone()
+    };
+    if fs::read_dir(&root).map_or(true, |mut r| r.next().is_none()) {
+        return Err("Il pacchetto scaricato è vuoto".into());
+    }
+
+    // Copia di sicurezza.
+    let backups = apps_dir.join("_backup");
+    let prefix = format!("{}_", safe_name(&folder));
+    let backup = backups.join(format!(
+        "{prefix}{}_{}",
+        safe_name(local.unwrap_or("prima")),
+        timestamp()
+    ));
+    archive::copy_tree(&app.dir, &backup, &|_| false)?;
+    log(
+        Kind::Info,
+        &format!("{}: copia di sicurezza fatta", app.name),
+    );
+
+    // Sostituzione: tolgo il vecchio (tranne i dati) e copio il nuovo.
+    let replaced = clear_except_kept(&app.dir, app.entry).and_then(|()| {
+        archive::copy_tree(&root, &app.dir, &|rel| {
+            is_kept(rel, app.entry) && app.dir.join(rel).exists()
+        })
+    });
+    if let Err(e) = replaced {
+        log(
+            Kind::Warn,
+            &format!("{}: ripristino la versione precedente…", app.name),
+        );
+        return match restore_backup(&app.dir, &backup) {
+            Ok(()) => Err(format!("{e} (versione precedente ripristinata)")),
+            Err(r) => Err(format!("{e}; ripristino non riuscito: {r}")),
+        };
+    }
+    let previous = state::load(&app.dir);
+    let st = State {
+        version: Some(latest.to_string()),
+        checked: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+        category: previous.category,
+        winget_id: previous.winget_id,
+    };
+    state::save(&app.dir, &st)?;
+    prune_backups(&backups, &prefix, 2);
+    Ok(())
+}
+
 /// Scarica e installa. Se qualcosa va storto dopo aver toccato l'app, la ripristina.
 pub fn apply(
     http: &dyn Http,
@@ -265,61 +419,7 @@ pub fn apply(
                 asset.size
             ));
         }
-        let new_dir = tmp.join("nuovo");
-        let root = if ext == "zip" || ext == "7z" {
-            if ext == "zip" {
-                archive::extract_zip(&file, &new_dir)?;
-            } else {
-                archive::extract_7z(&file, &new_dir)?;
-            }
-            archive::content_root(&new_dir)
-        } else {
-            fs::create_dir_all(&new_dir).map_err(|e| e.to_string())?;
-            fs::copy(&file, new_dir.join(&asset.name)).map_err(|e| e.to_string())?;
-            new_dir.clone()
-        };
-        if fs::read_dir(&root).map_or(true, |mut r| r.next().is_none()) {
-            return Err("Il pacchetto scaricato è vuoto".into());
-        }
-
-        // Copia di sicurezza.
-        let backups = apps_dir.join("_backup");
-        let prefix = format!("{}_", safe_name(&folder));
-        let backup = backups.join(format!(
-            "{prefix}{}_{}",
-            safe_name(local.unwrap_or("prima")),
-            timestamp()
-        ));
-        archive::copy_tree(&app.dir, &backup, &|_| false)?;
-        log(
-            Kind::Info,
-            &format!("{}: copia di sicurezza fatta", app.name),
-        );
-
-        // Sostituzione: tolgo il vecchio (tranne i dati) e copio il nuovo.
-        let replaced = clear_except_kept(&app.dir, app.entry).and_then(|()| {
-            archive::copy_tree(&root, &app.dir, &|rel| {
-                is_kept(rel, app.entry) && app.dir.join(rel).exists()
-            })
-        });
-        if let Err(e) = replaced {
-            log(
-                Kind::Warn,
-                &format!("{}: ripristino la versione precedente…", app.name),
-            );
-            return match restore_backup(&app.dir, &backup) {
-                Ok(()) => Err(format!("{e} (versione precedente ripristinata)")),
-                Err(r) => Err(format!("{e}; ripristino non riuscito: {r}")),
-            };
-        }
-        let previous = state::load(&app.dir);
-        let st = State {
-            version: Some(latest.to_string()),
-            checked: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
-            category: previous.category,
-        };
-        state::save(&app.dir, &st)?;
-        prune_backups(&backups, &prefix, 2);
+        install_from(app, local, latest, &file, &ext, &asset.name, &tmp, log)?;
         Ok(())
     })();
     let _ = fs::remove_dir_all(&tmp);
@@ -627,5 +727,102 @@ mod tests {
         assert!(!is_kept(Path::new("plugins/a.dll"), None));
         assert!(!is_kept(Path::new("app.exe"), e));
         assert!(is_kept(Path::new("liberdesk.json"), None));
+    }
+
+    fn wg_runner(
+        zip: &Path,
+        yaml: &'static str,
+        table: &'static str,
+    ) -> crate::winget::fake::FakeRunner {
+        let r = crate::winget::fake::FakeRunner::default();
+        r.responses
+            .lock()
+            .unwrap()
+            .push(("--exact".into(), 0, table.into()));
+        let zip = zip.to_path_buf();
+        r.hooks.lock().unwrap().push((
+            "download".into(),
+            Box::new(move |args: &[&str]| {
+                if let Some(p) = args.iter().position(|a| *a == "--download-directory") {
+                    let d = PathBuf::from(args[p + 1]);
+                    let _ = fs::create_dir_all(&d);
+                    let _ = fs::copy(&zip, d.join("Pacchetto_2.0.zip"));
+                    let _ = fs::write(d.join("Pacchetto.yaml"), yaml);
+                }
+            }),
+        ));
+        r
+    }
+
+    const WG_TABLE: &str = "Nome  ID  Versione  Origine\r\n--------------------------------\r\nApp  Ven.App  2.0  winget\r\n";
+
+    #[test]
+    fn winget_check_compares() {
+        let r = crate::winget::fake::FakeRunner::default();
+        r.responses
+            .lock()
+            .unwrap()
+            .push(("--exact".into(), 0, WG_TABLE.into()));
+        assert_eq!(
+            winget_check(&r, "Ven.App", Some("1.0")),
+            Check::Winget {
+                latest: "2.0".into(),
+                known: true
+            }
+        );
+        assert_eq!(
+            winget_check(&r, "Ven.App", Some("2.0")),
+            Check::Current("2.0".into())
+        );
+        assert_eq!(
+            winget_check(&r, "Ven.App", None),
+            Check::Winget {
+                latest: "2.0".into(),
+                known: false
+            }
+        );
+        assert!(matches!(
+            winget_check(&r, "No.Id", Some("1")),
+            Check::Error(_)
+        ));
+    }
+
+    #[test]
+    fn winget_apply_replaces_portable_zip_and_keeps_data() {
+        let d = tmp("wga");
+        let app = app_in(&d, "Ventoy");
+        fs::create_dir_all(app.dir.join("Data")).unwrap();
+        fs::write(app.dir.join("Data/utente.ini"), b"mio").unwrap();
+        let zip = d.join("p.zip");
+        make_zip(&zip, &[("nuovo.exe", b"nuovo"), ("lib.dll", b"x")]);
+        let r = wg_runner(
+            &zip,
+            "InstallerType: zip\nNestedInstallerType: portable\n",
+            WG_TABLE,
+        );
+        winget_apply(&r, &app, Some("1.0"), "2.0", "Ven.App", &mut |_, _| {}).unwrap();
+        assert!(app.dir.join("nuovo.exe").exists());
+        assert!(!app.dir.join("notepad++.exe").exists());
+        assert_eq!(fs::read(app.dir.join("Data/utente.ini")).unwrap(), b"mio");
+        assert_eq!(state::load(&app.dir).version.as_deref(), Some("2.0"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn winget_apply_refuses_installers_and_keeps_the_app() {
+        let d = tmp("wgb");
+        let app = app_in(&d, "Ventoy");
+        let zip = d.join("p.zip");
+        make_zip(&zip, &[("setup.exe", b"x")]);
+        let r = wg_runner(
+            &zip,
+            "InstallerType: zip\nNestedInstallerType: nullsoft\n",
+            WG_TABLE,
+        );
+        let e = winget_apply(&r, &app, Some("1.0"), "2.0", "Ven.App", &mut |_, _| {}).unwrap_err();
+        assert!(e.contains("non una versione portabile"), "{e}");
+        assert_eq!(fs::read(app.dir.join("notepad++.exe")).unwrap(), b"vecchio");
+        assert!(!d.join("_temp").join("Ventoy").exists());
+        let _ = fs::remove_dir_all(&d);
     }
 }

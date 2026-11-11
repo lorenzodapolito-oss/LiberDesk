@@ -38,3 +38,7 @@ La scheda **Non portabili** gestisce una cartella `Installers` (accanto al progr
 - Gli aggiornamenti passano da **winget**: tasto destro → «Associa a winget…» cerca il pacchetto e lo collega. All'avvio (e con il pulsante) LiberDesk confronta la versione, scarica il nuovo installer, sposta il vecchio in `_vecchi` e rigenera lo script. **Non installa nulla da solo**: l'installazione si lancia col tasto «Installa» o con `InstallaTutto.cmd`.
 - Senza pacchetto winget c'è «Cerca aggiornamento» (ricerca web).
 - Le associazioni sono in `_liberdesk.json` dentro la cartella `Installers`.
+
+## winget anche per i programmi portabili
+
+Nella scheda **Portabili**, tasto destro su una tessera → «Associa a winget…». All'avvio LiberDesk controlla l'ultima versione su winget; se è nuova la scarica e sostituisce l'app (copia di sicurezza, `Data`/`Settings` intatti). Lo fa **solo se il pacchetto winget è portabile** (zip o exe dichiarato `portable`): se offre un installer, avvisa e non tocca niente. Le app del catalogo continuano a usare GitHub.

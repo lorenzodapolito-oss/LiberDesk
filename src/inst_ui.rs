@@ -26,12 +26,86 @@ struct IRow {
     status: IStatus,
 }
 
-struct Assoc {
-    idx: usize,
-    query: String,
-    results: Vec<Pkg>,
-    busy: bool,
-    error: Option<String>,
+/// Finestra «Associa a winget»: ricerca di un pacchetto e scelta.
+pub struct Assoc {
+    pub idx: usize,
+    pub query: String,
+    pub results: Vec<Pkg>,
+    pub busy: bool,
+    pub error: Option<String>,
+}
+
+impl Assoc {
+    pub fn new(idx: usize, query: String) -> Self {
+        Self {
+            idx,
+            query,
+            results: Vec::new(),
+            busy: false,
+            error: None,
+        }
+    }
+
+    /// Mostra l'esito di una ricerca.
+    pub fn found(&mut self, res: Result<Vec<Pkg>, String>) {
+        self.busy = false;
+        match res {
+            Ok(v) => {
+                self.error = v.is_empty().then(|| "Nessun risultato.".to_string());
+                self.results = v;
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+}
+
+pub enum AssocAct {
+    None,
+    Search(String),
+    Choose(String),
+    Close,
+}
+
+pub fn assoc_dialog(ctx: &egui::Context, a: &mut Assoc, name: &str) -> AssocAct {
+    let mut act = AssocAct::None;
+    egui::Window::new(format!("Associa «{name}» a winget"))
+        .collapsible(false)
+        .default_width(520.0)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let te = ui.add(egui::TextEdit::singleline(&mut a.query).desired_width(280.0));
+                let go = ui
+                    .add_enabled(!a.busy, egui::Button::new("Cerca"))
+                    .clicked()
+                    || (te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                if go && !a.busy {
+                    a.busy = true;
+                    act = AssocAct::Search(a.query.clone());
+                }
+                if ui.button("Chiudi").clicked() {
+                    act = AssocAct::Close;
+                }
+            });
+            if a.busy {
+                ui.label("Cerco…");
+            }
+            if let Some(e) = &a.error {
+                ui.label(RichText::new(e).color(theme::ERR));
+            }
+            egui::ScrollArea::vertical()
+                .max_height(260.0)
+                .show(ui, |ui| {
+                    for p in &a.results {
+                        if ui
+                            .button(format!("{} — {} ({})", p.name, p.id, p.version))
+                            .clicked()
+                        {
+                            act = AssocAct::Choose(p.id.clone());
+                        }
+                    }
+                });
+        });
+    act
 }
 
 struct Switches {
@@ -158,14 +232,7 @@ impl InstApp {
                 Ev::Log(k, m) => self.say(k, m),
                 Ev::Found(res) => {
                     if let Some(a) = &mut self.assoc {
-                        a.busy = false;
-                        match res {
-                            Ok(v) => {
-                                a.error = v.is_empty().then(|| "Nessun risultato.".to_string());
-                                a.results = v;
-                            }
-                            Err(e) => a.error = Some(e),
-                        }
+                        a.found(res);
                     }
                 }
                 Ev::Finished => self.busy = false,
@@ -583,42 +650,12 @@ impl InstApp {
                 .get(a.idx)
                 .map(|r| r.ins.name.clone())
                 .unwrap_or_default();
-            egui::Window::new(format!("Associa «{name}» a winget"))
-                .collapsible(false)
-                .default_width(520.0)
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        let te =
-                            ui.add(egui::TextEdit::singleline(&mut a.query).desired_width(280.0));
-                        let go = ui
-                            .add_enabled(!a.busy, egui::Button::new("Cerca"))
-                            .clicked()
-                            || (te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-                        if go {
-                            do_search = Some(a.query.clone());
-                            a.busy = true;
-                        }
-                        if ui.button("Chiudi").clicked() {
-                            close = true;
-                        }
-                    });
-                    if a.busy {
-                        ui.label("Cerco…");
-                    }
-                    if let Some(e) = &a.error {
-                        ui.label(RichText::new(e).color(theme::ERR));
-                    }
-                    egui::ScrollArea::vertical()
-                        .max_height(260.0)
-                        .show(ui, |ui| {
-                            for p in &a.results {
-                                let txt = format!("{} — {} ({})", p.name, p.id, p.version);
-                                if ui.button(txt).clicked() {
-                                    chosen = Some((a.idx, p.id.clone()));
-                                }
-                            }
-                        });
-                });
+            match assoc_dialog(ctx, a, &name) {
+                AssocAct::Search(q) => do_search = Some(q),
+                AssocAct::Choose(id) => chosen = Some((a.idx, id)),
+                AssocAct::Close => close = true,
+                AssocAct::None => {}
+            }
         }
         if let Some(q) = do_search {
             let runner = Arc::clone(&self.runner);

@@ -133,6 +133,80 @@ pub fn download(r: &dyn Runner, id: &str, dir: &Path) -> Result<PathBuf, String>
     })
 }
 
+/// File scaricato da winget e tipo di installer dichiarato nel manifest.
+pub struct Got {
+    pub file: PathBuf,
+    pub kind: Option<String>,
+}
+
+/// Tipo dichiarato nel manifest (`NestedInstallerType` se presente, altrimenti `InstallerType`).
+pub fn manifest_kind(yaml: &str) -> Option<String> {
+    let find = |key: &str| {
+        yaml.lines().find_map(|l| {
+            let t = l.trim().trim_start_matches("- ").trim();
+            t.strip_prefix(key)
+                .map(|v| v.trim().trim_matches(['"', '\'']).to_lowercase())
+                .filter(|v| !v.is_empty())
+        })
+    };
+    find("NestedInstallerType:").or_else(|| find("InstallerType:"))
+}
+
+/// Si può usare come app portabile? Solo archivi o exe dichiarati «portable»: gli installer no.
+pub fn is_portable_package(ext: &str, kind: Option<&str>) -> bool {
+    matches!(
+        (ext, kind),
+        ("zip" | "7z" | "exe", Some("portable")) | ("zip", Some("zip")) | ("zip" | "7z", None)
+    )
+}
+
+/// Come `download`, ma accetta anche zip e 7z e legge il tipo dal manifest.
+pub fn download_any(r: &dyn Runner, id: &str, dir: &Path) -> Result<Got, String> {
+    fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let d = dir.to_string_lossy().to_string();
+    let mut args = vec!["download", "--id", id, "--exact"];
+    args.extend(COMMON);
+    args.extend([
+        "--download-directory",
+        d.as_str(),
+        "--accept-package-agreements",
+        "--disable-interactivity",
+    ]);
+    let o = r.run("winget", &args)?;
+    let mut best: Option<(u64, PathBuf)> = None;
+    let mut kind = None;
+    for e in fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
+        let p = e.path();
+        let x = p
+            .extension()
+            .map(|x| x.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if x == "yaml" || x == "yml" {
+            if let Ok(t) = fs::read_to_string(&p) {
+                kind = kind.or_else(|| manifest_kind(&t));
+            }
+        } else if matches!(x.as_str(), "exe" | "msi" | "zip" | "7z" | "msix" | "appx") {
+            let n = e.metadata().map(|m| m.len()).unwrap_or(0);
+            if best.as_ref().is_none_or(|(b, _)| n > *b) {
+                best = Some((n, p));
+            }
+        }
+    }
+    match best {
+        Some((_, file)) => Ok(Got { file, kind }),
+        None => Err(format!(
+            "winget non ha scaricato nessun file (codice {}): {}",
+            o.code,
+            o.text
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+        )),
+    }
+}
+
 #[cfg(test)]
 pub mod fake {
     use super::*;
@@ -224,6 +298,27 @@ Firefox Developer Edition  Mozilla.Firefox.DeveloperEdition.it  151.0b1  winget\
             .unwrap()
             .push(("--version".into(), 0, "v1.9".into()));
         assert!(available(&r));
+    }
+
+    #[test]
+    fn manifest_kinds_and_portable_rule() {
+        assert_eq!(
+            manifest_kind("InstallerType: zip\nNestedInstallerType: portable\n").as_deref(),
+            Some("portable")
+        );
+        assert_eq!(
+            manifest_kind("Installers:\n- Architecture: x64\n  InstallerType: nullsoft\n")
+                .as_deref(),
+            Some("nullsoft")
+        );
+        assert_eq!(manifest_kind("a: b"), None);
+        assert!(is_portable_package("zip", Some("portable")));
+        assert!(is_portable_package("exe", Some("portable")));
+        assert!(is_portable_package("zip", None));
+        assert!(!is_portable_package("exe", None));
+        assert!(!is_portable_package("exe", Some("nullsoft")));
+        assert!(!is_portable_package("zip", Some("inno")));
+        assert!(!is_portable_package("msi", Some("portable")));
     }
 
     #[test]
