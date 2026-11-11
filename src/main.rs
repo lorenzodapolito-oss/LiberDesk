@@ -5,6 +5,7 @@ mod app;
 mod archive;
 mod catalog;
 mod config;
+mod describe;
 mod github;
 mod inst_ui;
 mod inst_update;
