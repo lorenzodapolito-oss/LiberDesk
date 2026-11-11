@@ -29,3 +29,12 @@ Su Windows basta `costruisci-liberdesk.cmd` (scarica, compila e crea `dist\Liber
 ## Aggiungere un'app al catalogo
 In `src/catalog.rs` una riga `gh!(nome, categoria, [nomi cartella], eseguibile, [file da tenere], "utente/repo", "modello del file")`.
 Il modello è un'espressione regolare sul nome del file da scaricare nella release.
+
+## Programmi non portabili
+
+La scheda **Non portabili** gestisce una cartella `Installers` (accanto al programma, cambiabile) con gli installer `.exe` / `.msi`, anche in sottocartelle per categoria.
+
+- Riconosce il tipo (MSI, Inno Setup, NSIS, InstallShield, WiX Burn) e genera accanto a ogni installer uno script `Installa_<nome>.cmd` silenzioso (chiede i permessi di amministratore), più `InstallaTutto.cmd` che li lancia tutti. Per i tipi sconosciuti: tasto destro → «Parametri silenziosi…».
+- Gli aggiornamenti passano da **winget**: tasto destro → «Associa a winget…» cerca il pacchetto e lo collega. All'avvio (e con il pulsante) LiberDesk confronta la versione, scarica il nuovo installer, sposta il vecchio in `_vecchi` e rigenera lo script. **Non installa nulla da solo**: l'installazione si lancia col tasto «Installa» o con `InstallaTutto.cmd`.
+- Senza pacchetto winget c'è «Cerca aggiornamento» (ricerca web).
+- Le associazioni sono in `_liberdesk.json` dentro la cartella `Installers`.

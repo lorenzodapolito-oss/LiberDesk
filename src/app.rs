@@ -1,6 +1,7 @@
 //! Interfaccia: elenco delle app, controllo e aggiornamento all'avvio, registro.
 
 use crate::config::{self, Config};
+use crate::inst_ui::InstApp;
 use crate::net::{Http, RealHttp};
 use crate::scan::{self, App};
 use crate::state;
@@ -51,7 +52,16 @@ struct Row {
     status: Status,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Portable,
+    Installers,
+}
+
 pub struct LiberApp {
+    mode: Mode,
+    inst: InstApp,
+    inst_pending: bool,
     base: PathBuf,
     cfg_path: PathBuf,
     cfg: Config,
@@ -69,7 +79,7 @@ pub struct LiberApp {
     probe: Arc<dyn Probe>,
 }
 
-fn kind_color(k: Kind) -> Color32 {
+pub(crate) fn kind_color(k: Kind) -> Color32 {
     match k {
         Kind::Info => theme::LOG_INFO,
         Kind::Ok => theme::LOG_OK,
@@ -79,7 +89,7 @@ fn kind_color(k: Kind) -> Color32 {
 }
 
 /// Colore pastello dell'iniziale, scelto dal nome.
-fn avatar_color(name: &str) -> Color32 {
+pub(crate) fn avatar_color(name: &str) -> Color32 {
     const COLORS: [Color32; 6] = [
         Color32::from_rgb(0xFF, 0xB3, 0xDE),
         Color32::from_rgb(0xB7, 0xC4, 0xFF),
@@ -106,13 +116,13 @@ pub fn category_of(app: &App, st: &state::State) -> String {
 }
 
 /// Categoria principale (`Video › Editor` -> `Video`).
-fn main_of(c: &str) -> &str {
+pub(crate) fn main_of(c: &str) -> &str {
     c.split(crate::scan::SEPARATOR).next().unwrap_or(c)
 }
 
 /// Posizione di una categoria: quelle note nel loro ordine, le altre in ordine alfabetico,
 /// «Altro» per ultima.
-fn rank(c: &str) -> (u8, usize, String) {
+pub(crate) fn rank(c: &str) -> (u8, usize, String) {
     if c == "Altro" {
         return (2, 0, String::new());
     }
@@ -123,7 +133,7 @@ fn rank(c: &str) -> (u8, usize, String) {
 }
 
 /// Indici delle righe per categoria; salta quelle vuote.
-fn group(rows: &[(String, String)], filter: &str) -> Vec<(String, Vec<usize>)> {
+pub(crate) fn group(rows: &[(String, String)], filter: &str) -> Vec<(String, Vec<usize>)> {
     let f = filter.trim().to_lowercase();
     let mut cats: Vec<&String> = rows.iter().map(|(c, _)| c).collect();
     cats.sort_by_key(|c| (rank(main_of(c)), c.to_lowercase()));
@@ -149,7 +159,11 @@ impl LiberApp {
         let cfg_path = base.join("liberdesk.json");
         let cfg = config::load(&cfg_path);
         let (tx, rx) = channel();
+        let inst = InstApp::new(cfg.effective_installers_dir(&base));
         let s = Self {
+            mode: Mode::Portable,
+            inst,
+            inst_pending: true,
             base,
             cfg_path,
             cfg,
@@ -624,9 +638,17 @@ impl LiberApp {
 }
 
 impl eframe::App for LiberApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        theme::BG.to_normalized_gamma_f32()
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.pump();
         let ctx = ui.ctx().clone();
+        self.inst.pump(&ctx);
+        for (c, m) in self.inst.take_logs() {
+            self.log.push((c, m));
+        }
         if !self.started {
             self.started = true;
             self.pending_check = self.cfg.auto_check;
@@ -637,6 +659,18 @@ impl eframe::App for LiberApp {
             self.say(Kind::Info, "Controllo gli aggiornamenti…");
             let install = self.cfg.auto_install;
             self.check(&ctx, None, install);
+        }
+        self.inst.ensure_loaded(&ctx);
+        if self.inst_pending && self.cfg.auto_check && self.started && !self.inst.busy() {
+            self.inst_pending = false;
+            if self.inst.has_ids() {
+                self.say(
+                    Kind::Info,
+                    "Controllo i programmi non portabili con winget…",
+                );
+                let install = self.cfg.auto_install;
+                self.inst.check(&ctx, None, install);
+            }
         }
         egui::Panel::top("top").show(ui, |ui| {
             ui.add_space(6.0);
@@ -652,62 +686,113 @@ impl eframe::App for LiberApp {
                         .size(15.0)
                         .color(theme::MUTED),
                 );
+                ui.add_space(16.0);
+                ui.selectable_value(&mut self.mode, Mode::Portable, "Portabili");
+                ui.selectable_value(&mut self.mode, Mode::Installers, "Non portabili");
             });
-            ui.horizontal_wrapped(|ui| {
-                let busy = self.busy;
-                if ui
-                    .add_enabled(
-                        !busy,
-                        egui::Button::new(
-                            RichText::new("Controlla e aggiorna tutto")
-                                .strong()
-                                .color(theme::ON_COLOR),
-                        )
-                        .fill(theme::SCAN),
+            if self.mode == Mode::Installers {
+                ui.horizontal_wrapped(|ui| {
+                    let busy = self.inst.busy();
+                    let b = egui::Button::new(
+                        RichText::new("Controlla e scarica aggiornamenti (winget)")
+                            .strong()
+                            .color(theme::ON_COLOR),
                     )
-                    .clicked()
-                {
-                    self.check(&ctx, None, true);
-                }
-                if ui
-                    .add_enabled(!busy, egui::Button::new("Solo controlla"))
-                    .clicked()
-                {
-                    self.check(&ctx, None, false);
-                }
-                if ui.button("Rileggi la cartella").clicked() {
-                    self.rescan();
-                }
-                if ui.button("Apri la cartella delle app").clicked() {
-                    self.open_folder();
-                }
-                if ui.button("Cambia cartella…").clicked() {
-                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                        self.cfg.apps_dir = p.to_string_lossy().to_string();
-                        self.save_cfg();
-                        self.rows.clear();
+                    .fill(theme::SCAN);
+                    if ui.add_enabled(!busy, b).clicked() {
+                        self.inst.check(&ctx, None, true);
+                    }
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Solo controlla"))
+                        .clicked()
+                    {
+                        self.inst.check(&ctx, None, false);
+                    }
+                    if ui.button("Crea tutti gli script silenziosi").clicked() {
+                        self.inst.create_scripts();
+                    }
+                    if ui.button("Rileggi la cartella").clicked() {
+                        self.inst.load(&ctx);
+                    }
+                    if ui.button("Apri la cartella").clicked() {
+                        self.inst.open_folder();
+                    }
+                    if ui.button("Cambia cartella…").clicked() {
+                        if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                            self.cfg.installers_dir = p.to_string_lossy().to_string();
+                            self.save_cfg();
+                            self.inst.set_root(p);
+                            self.inst.load(&ctx);
+                        }
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Cerca:");
+                    ui.add(egui::TextEdit::singleline(&mut self.inst.filter).desired_width(160.0));
+                    ui.label(
+                        RichText::new(self.inst.root().display().to_string()).color(theme::MUTED),
+                    );
+                });
+            }
+            if self.mode == Mode::Portable {
+                ui.horizontal_wrapped(|ui| {
+                    let busy = self.busy;
+                    if ui
+                        .add_enabled(
+                            !busy,
+                            egui::Button::new(
+                                RichText::new("Controlla e aggiorna tutto")
+                                    .strong()
+                                    .color(theme::ON_COLOR),
+                            )
+                            .fill(theme::SCAN),
+                        )
+                        .clicked()
+                    {
+                        self.check(&ctx, None, true);
+                    }
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Solo controlla"))
+                        .clicked()
+                    {
+                        self.check(&ctx, None, false);
+                    }
+                    if ui.button("Rileggi la cartella").clicked() {
                         self.rescan();
                     }
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                let mut changed = false;
-                changed |= ui
-                    .checkbox(&mut self.cfg.auto_check, "Controlla all'avvio")
-                    .changed();
-                changed |= ui
-                    .checkbox(
-                        &mut self.cfg.auto_install,
-                        "Installa subito gli aggiornamenti trovati",
-                    )
-                    .changed();
-                if changed {
-                    self.save_cfg();
-                }
-                ui.label("Cerca:");
-                ui.add(egui::TextEdit::singleline(&mut self.filter).desired_width(160.0));
-                ui.label(RichText::new(self.apps_dir().display().to_string()).color(theme::MUTED));
-            });
+                    if ui.button("Apri la cartella delle app").clicked() {
+                        self.open_folder();
+                    }
+                    if ui.button("Cambia cartella…").clicked() {
+                        if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                            self.cfg.apps_dir = p.to_string_lossy().to_string();
+                            self.save_cfg();
+                            self.rows.clear();
+                            self.rescan();
+                        }
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    let mut changed = false;
+                    changed |= ui
+                        .checkbox(&mut self.cfg.auto_check, "Controlla all'avvio")
+                        .changed();
+                    changed |= ui
+                        .checkbox(
+                            &mut self.cfg.auto_install,
+                            "Installa subito gli aggiornamenti trovati",
+                        )
+                        .changed();
+                    if changed {
+                        self.save_cfg();
+                    }
+                    ui.label("Cerca:");
+                    ui.add(egui::TextEdit::singleline(&mut self.filter).desired_width(160.0));
+                    ui.label(
+                        RichText::new(self.apps_dir().display().to_string()).color(theme::MUTED),
+                    );
+                });
+            }
             ui.add_space(4.0);
         });
         egui::Panel::bottom("log").show(ui, |ui| {
@@ -729,9 +814,16 @@ impl eframe::App for LiberApp {
         });
         egui::Panel::left("cats")
             .default_size(170.0)
-            .show(ui, |ui| self.side(ui));
-        egui::CentralPanel::default().show(ui, |ui| self.list(ui, &ctx));
-        if self.busy || self.loading {
+            .show(ui, |ui| match self.mode {
+                Mode::Portable => self.side(ui),
+                Mode::Installers => self.inst.side(ui),
+            });
+        egui::CentralPanel::default().show(ui, |ui| match self.mode {
+            Mode::Portable => self.list(ui, &ctx),
+            Mode::Installers => self.inst.list(ui, &ctx),
+        });
+        self.inst.windows(&ctx);
+        if self.busy || self.loading || self.inst.busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }
     }

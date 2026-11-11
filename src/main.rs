@@ -6,6 +6,9 @@ mod archive;
 mod catalog;
 mod config;
 mod github;
+mod inst_ui;
+mod inst_update;
+mod installers;
 mod net;
 mod scan;
 mod search;
@@ -13,6 +16,7 @@ mod state;
 mod theme;
 mod update;
 mod version;
+mod winget;
 
 fn app_icon() -> eframe::egui::IconData {
     eframe::egui::IconData {

@@ -2,14 +2,14 @@
 
 use eframe::egui::{self, Color32, CornerRadius, Stroke};
 
-/// Sfondo: azzurro lavanda tenue.
-pub const BG: Color32 = Color32::from_rgb(0xDD, 0xE4, 0xFF);
-/// Pannelli e finestre: rosa tenue.
-pub const SURFACE: Color32 = Color32::from_rgb(0xFF, 0xE4, 0xF2);
+/// Sfondo: celeste pastello.
+pub const BG: Color32 = Color32::from_rgb(0xC9, 0xE8, 0xFA);
+/// Pannelli e finestre: celeste un po' più chiaro (mai bianco).
+pub const SURFACE: Color32 = Color32::from_rgb(0xDA, 0xF0, 0xFC);
 /// Riga alternata delle tabelle: lilla chiaro.
-pub const STRIPE: Color32 = Color32::from_rgb(0xEE, 0xE6, 0xFF);
+pub const STRIPE: Color32 = Color32::from_rgb(0xB9, 0xDF, 0xF5);
 pub const PRIMARY: Color32 = Color32::from_rgb(0x2B, 0x3B, 0xB8);
-pub const PRIMARY_LIGHT: Color32 = Color32::from_rgb(0xC9, 0xD3, 0xFF);
+pub const PRIMARY_LIGHT: Color32 = Color32::from_rgb(0xAF, 0xD6, 0xF2);
 /// Testo: blu notte.
 pub const TEXT: Color32 = Color32::from_rgb(0x14, 0x1E, 0x6B);
 /// Testo secondario: blu petrolio.

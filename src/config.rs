@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     /// Cartella delle app; vuota = `Apps` accanto al programma.
     pub apps_dir: String,
+    /// Cartella degli installer non portabili; vuota = `Installers` accanto al programma.
+    pub installers_dir: String,
     /// Controlla gli aggiornamenti all'avvio.
     pub auto_check: bool,
     /// Scarica e installa subito quelli trovati.
@@ -18,6 +20,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             apps_dir: String::new(),
+            installers_dir: String::new(),
             auto_check: true,
             auto_install: true,
         }
@@ -29,6 +32,17 @@ impl Config {
         let d = self.apps_dir.trim();
         if d.is_empty() {
             base.join("Apps")
+        } else {
+            PathBuf::from(d)
+        }
+    }
+}
+
+impl Config {
+    pub fn effective_installers_dir(&self, base: &Path) -> PathBuf {
+        let d = self.installers_dir.trim();
+        if d.is_empty() {
+            base.join("Installers")
         } else {
             PathBuf::from(d)
         }
@@ -68,6 +82,7 @@ mod tests {
         assert_eq!(load(&f), Config::default());
         let c = Config {
             apps_dir: "E:\\Apps".into(),
+            installers_dir: "E:\\Inst".into(),
             auto_check: false,
             auto_install: false,
         };
@@ -77,6 +92,11 @@ mod tests {
         assert_eq!(load(&f), Config::default());
         assert_eq!(Config::default().effective_dir(&d), d.join("Apps"));
         assert_eq!(c.effective_dir(&d), PathBuf::from("E:\\Apps"));
+        assert_eq!(
+            Config::default().effective_installers_dir(&d),
+            d.join("Installers")
+        );
+        assert_eq!(c.effective_installers_dir(&d), PathBuf::from("E:\\Inst"));
         let _ = std::fs::remove_dir_all(&d);
     }
 }
