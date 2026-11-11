@@ -15,6 +15,7 @@ mod scan;
 mod search;
 mod state;
 mod theme;
+mod trash;
 mod update;
 mod version;
 mod winget;

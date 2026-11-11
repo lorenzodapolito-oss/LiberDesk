@@ -64,6 +64,7 @@ enum Mode {
 pub struct LiberApp {
     mode: Mode,
     runner: Arc<dyn Runner>,
+    confirm_trash: Option<usize>,
     assoc: Option<Assoc>,
     inst: InstApp,
     inst_pending: bool,
@@ -173,6 +174,7 @@ impl LiberApp {
             mode: Mode::Portable,
             runner: Arc::new(RealRunner),
             assoc: None,
+            confirm_trash: None,
             inst,
             inst_pending: true,
             base,
@@ -550,6 +552,68 @@ impl LiberApp {
         }
     }
 
+    /// Conferma e spostamento di un'app nel Cestino.
+    fn trash_window(&mut self, ctx: &egui::Context) {
+        let Some(i) = self.confirm_trash else {
+            return;
+        };
+        let Some((name, dir)) = self
+            .rows
+            .get(i)
+            .map(|r| (r.app.name.clone(), r.app.dir.clone()))
+        else {
+            self.confirm_trash = None;
+            return;
+        };
+        let mut yes = false;
+        let mut no = false;
+        egui::Window::new("Spostare nel Cestino?")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "«{name}» e tutti i suoi file (anche Data e impostazioni) vanno nel Cestino."
+                ));
+                ui.label(
+                    RichText::new(dir.display().to_string())
+                        .color(theme::MUTED)
+                        .small(),
+                );
+                ui.label("Puoi recuperarli dal Cestino di Windows.");
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Sposta nel Cestino")
+                                    .strong()
+                                    .color(theme::ON_COLOR),
+                            )
+                            .fill(theme::INSTALL),
+                        )
+                        .clicked()
+                    {
+                        yes = true;
+                    }
+                    if ui.button("Annulla").clicked() {
+                        no = true;
+                    }
+                });
+            });
+        if yes {
+            let root = self.apps_dir();
+            match crate::trash::to_recycle_bin(&root, &dir) {
+                Ok(()) => {
+                    self.say(Kind::Ok, format!("{name}: spostato nel Cestino"));
+                    let _ = self.tx.send(Event::Rescan);
+                }
+                Err(e) => self.say(Kind::Err, format!("{name}: {e}")),
+            }
+        }
+        if yes || no {
+            self.confirm_trash = None;
+        }
+    }
+
     /// Finestra «Associa a winget» delle app portabili.
     fn assoc_window(&mut self, ctx: &egui::Context) {
         let Some(a) = &mut self.assoc else {
@@ -639,6 +703,7 @@ impl LiberApp {
             }
         }
         let mut launch = None;
+        let mut trash: Option<usize> = None;
         let mut upd = None;
         let mut search = None;
         let mut moved: Option<(usize, String)> = None;
@@ -697,7 +762,7 @@ impl LiberApp {
                                     });
                                 });
                                 if let Some(d) = crate::describe::of(&r.app.name) {
-                                    ui.add(egui::Label::new(RichText::new(d).color(theme::TEXT).small()).truncate()).on_hover_text(d);
+                                    ui.add(egui::Label::new(RichText::new(d).color(theme::TEXT).size(13.5)).wrap());
                                 }
                                 let (t, c) = Self::status_text(r);
                                 let resp = ui.add(egui::Label::new(RichText::new(t).color(c).small().strong()).truncate());
@@ -708,6 +773,10 @@ impl LiberApp {
                                     let start = egui::Button::new(RichText::new("Avvia").strong().color(theme::ON_COLOR)).fill(theme::DOWNLOAD);
                                     if ui.add(start).clicked() {
                                         launch = Some(i);
+                                    }
+                                    let bin = egui::Button::new(RichText::new("Cestino").color(theme::ON_COLOR)).fill(theme::INSTALL);
+                                    if ui.add(bin).on_hover_text("Sposta la cartella del programma nel Cestino").clicked() {
+                                        trash = Some(i);
                                     }
                                     if r.app.entry.is_none()
                                         && r.winget.is_none()
@@ -752,6 +821,9 @@ impl LiberApp {
         });
         if let Some(i) = launch {
             self.launch(i);
+        }
+        if let Some(i) = trash {
+            self.confirm_trash = Some(i);
         }
         if let Some(i) = upd {
             self.check(ctx, Some(i), true);
@@ -962,6 +1034,7 @@ impl eframe::App for LiberApp {
         });
         self.inst.windows(&ctx);
         self.assoc_window(&ctx);
+        self.trash_window(&ctx);
         if self.busy || self.loading || self.inst.busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }
